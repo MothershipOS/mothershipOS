@@ -1,0 +1,20 @@
+# mothershipOS: sources and docs only. Build outputs and downloads stay local.
+target/
+downloads/
+*.deb
+*.tar
+*.tar.gz
+*.cpio.gz
+*.itb
+*.dtb
+*.img
+*.mbn
+*.bin
+*.elf
+*.o
+*.so
+__pycache__/
+*.pyc
+*.log
+.known_hosts
+*.ko

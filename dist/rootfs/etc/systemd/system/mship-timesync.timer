@@ -1,0 +1,9 @@
+[Unit]
+Description=Re-sync the clock hourly (mothershipOS)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target

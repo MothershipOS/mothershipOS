@@ -1,0 +1,12 @@
+[package]
+name = "mship-gles-shim"
+description = "libGLESv2.so for Cuttlefish's crosvm/gfxstream: zero-copy scanout of guest frames to the VM's presenter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+libc.workspace = true

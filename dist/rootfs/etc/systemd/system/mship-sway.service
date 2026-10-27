@@ -1,0 +1,23 @@
+[Unit]
+Description=mothershipOS host compositor (sway on DSI-1)
+Requires=seatd.service
+After=seatd.service systemd-user-sessions.service getty@tty1.service
+Conflicts=getty@tty1.service
+
+[Service]
+User=mship
+WorkingDirectory=~
+RuntimeDirectory=mship-wayland
+RuntimeDirectoryMode=0700
+Environment=XDG_RUNTIME_DIR=/run/mship-wayland
+Environment=WLR_DRM_DEVICES=/dev/dri/card1
+Environment=WLR_LIBINPUT_NO_DEVICES=1
+Environment=LIBSEAT_BACKEND=seatd
+ExecStart=/usr/bin/sway
+# VMs started from the shell run in this unit; the kernel OOM-killing one must not stop the whole session
+OOMPolicy=continue
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

@@ -1,0 +1,2 @@
+# in the guest kernel: CONFIG_MSHIP_WIFI; out of tree (M=): a module
+obj-$(or $(CONFIG_MSHIP_WIFI),m) += mship_wifi.o

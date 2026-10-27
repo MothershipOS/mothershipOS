@@ -1,0 +1,13 @@
+[package]
+name = "mship"
+description = "mothershipOS command line: VMs, hardware handover, screen, power, settings (talks to mothershipd)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mship-core.workspace = true
+mship-host = { path = "../mship-host" }
+serde_json.workspace = true
+libc.workspace = true
+clap = { version = "4", features = ["derive"] }

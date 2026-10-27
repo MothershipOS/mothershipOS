@@ -1,0 +1,126 @@
+The guest's own suspend: KVM_CAP_ARM_SYSTEM_SUSPEND brings the guest's PSCI SYSTEM_SUSPEND to crosvm, which
+sets the vCPU up for the resume entry, parks it as `crosvm suspend` does and asks mothershipd for vm.sleep;
+`crosvm resume` wakes the guest at its resume entry.
+
+diff --git a/hypervisor/src/kvm/aarch64.rs b/hypervisor/src/kvm/aarch64.rs
+index 6af94c1ef..fe30bb92b 100644
+--- a/hypervisor/src/kvm/aarch64.rs
++++ b/hypervisor/src/kvm/aarch64.rs
+@@ -105,6 +105,13 @@ impl KvmVm {
+             // Safe because it does not take pointer arguments.
+             unsafe { self.enable_raw_capability(KvmCap::ArmMte, 0, &[0, 0, 0, 0])? }
+         }
++        // The guest's PSCI SYSTEM_SUSPEND comes to us (VcpuExit::SystemEventSuspend) instead of being refused:
++        // the guest kernel then offers suspend-to-RAM ("deep").
++        if self.check_raw_capability(KvmCap::ArmSystemSuspend) {
++            // SAFETY:
++            // Safe because it does not take pointer arguments.
++            unsafe { self.enable_raw_capability(KvmCap::ArmSystemSuspend, 0, &[0, 0, 0, 0])? }
++        }
+         #[cfg(target_os = "android")]
+         if cfg.ffa {
+             self.set_enable_ffa(true)?;
+diff --git a/hypervisor/src/kvm/cap.rs b/hypervisor/src/kvm/cap.rs
+index 8aa965596..c095ab9ba 100644
+--- a/hypervisor/src/kvm/cap.rs
++++ b/hypervisor/src/kvm/cap.rs
+@@ -123,6 +123,7 @@ pub enum KvmCap {
+     ArmProtectedVm = KVM_CAP_ARM_PROTECTED_VM,
+     X86ProtectedVm = KVM_CAP_X86_PROTECTED_VM,
+     ArmMte = KVM_CAP_ARM_MTE,
++    ArmSystemSuspend = KVM_CAP_ARM_SYSTEM_SUSPEND,
+     #[cfg(target_arch = "x86_64")]
+     BusLockDetect = KVM_CAP_X86_BUS_LOCK_EXIT,
+     // TODO(b/388092267): Rename when the overloading is resolved.
+diff --git a/hypervisor/src/kvm/mod.rs b/hypervisor/src/kvm/mod.rs
+index c165a2821..3aab8b4f9 100644
+--- a/hypervisor/src/kvm/mod.rs
++++ b/hypervisor/src/kvm/mod.rs
+@@ -1155,6 +1155,7 @@ impl Vcpu for KvmVcpu {
+                     KVM_SYSTEM_EVENT_SHUTDOWN => Ok(VcpuExit::SystemEventShutdown),
+                     KVM_SYSTEM_EVENT_RESET => self.system_event_reset(event_flags),
+                     KVM_SYSTEM_EVENT_CRASH => Ok(VcpuExit::SystemEventCrash),
++                    KVM_SYSTEM_EVENT_SUSPEND => Ok(VcpuExit::SystemEventSuspend),
+                     _ => {
+                         error!(
+                             "Unknown KVM system event {} with flags {}",
+diff --git a/hypervisor/src/lib.rs b/hypervisor/src/lib.rs
+index 0aff8b76a..afea06531 100644
+--- a/hypervisor/src/lib.rs
++++ b/hypervisor/src/lib.rs
+@@ -532,6 +532,8 @@ pub enum VcpuExit {
+     SystemEventShutdown,
+     SystemEventReset,
+     SystemEventCrash,
++    /// The guest asked to suspend the VM (PSCI SYSTEM_SUSPEND on aarch64).
++    SystemEventSuspend,
+     /// An invalid vcpu register was set while running.
+     InvalidVpRegister,
+     /// incorrect setup for vcpu requiring an unsupported feature
+diff --git a/src/crosvm/sys/linux/vcpu.rs b/src/crosvm/sys/linux/vcpu.rs
+index 047bdf706..7f38ac60e 100644
+--- a/src/crosvm/sys/linux/vcpu.rs
++++ b/src/crosvm/sys/linux/vcpu.rs
+@@ -208,6 +208,45 @@ pub fn remove_vcpu_signal_handler() -> Result<()> {
+     clear_signal_handler(SIGRTMIN() + 0).context("error unregistering signal handler")
+ }
+ 
++/// PSCI SYSTEM_SUSPEND (DEN0022 5.19), the guest's suspend-to-RAM: the caller is the only vCPU still on. Set it
++/// up as PSCI resumes a CPU (6.4.3): at the entry point (x1) with the context id (x2) in x0, EL1h with interrupts
++/// masked, MMU and data cache off. It runs again when the VM is resumed.
++#[cfg(target_arch = "aarch64")]
++fn psci_system_suspend(vcpu: &dyn VcpuArch) -> Result<()> {
++    use hypervisor::VcpuRegAArch64::*;
++    let entry = vcpu.get_one_reg(X(1))?;
++    let context = vcpu.get_one_reg(X(2))?;
++    let sctlr = vcpu.get_one_reg(System(aarch64_sys_reg::SCTLR_EL1))?;
++    vcpu.set_one_reg(Pc, entry)?;
++    vcpu.set_one_reg(X(0), context)?;
++    vcpu.set_one_reg(Pstate, 0x3c5)?; // EL1h, DAIF masked
++    vcpu.set_one_reg(System(aarch64_sys_reg::SCTLR_EL1), sctlr & !(1 | 1 << 2))?; // M, C off
++    Ok(())
++}
++
++/// mothershipOS: the guest suspended itself, so the host puts the VM to sleep (mothershipd `vm.sleep`: devices
++/// back to the host, display off, woken by a key, a click or the Wake button, which resumes it). The VM is the
++/// directory mothershipOS started it in (MSHIP_VM_DIR).
++#[cfg(target_arch = "aarch64")]
++fn mship_vm_sleep() {
++    let Some(vm) = std::env::var_os("MSHIP_VM_DIR")
++        .and_then(|d| std::path::Path::new(&d).file_name().map(|n| n.to_string_lossy().into_owned()))
++    else {
++        return;
++    };
++    thread::spawn(move || {
++        let req = format!("{{\"id\":1,\"op\":\"vm.sleep\",\"vm\":\"{}\"}}\n", vm);
++        let r = std::os::unix::net::UnixStream::connect("/run/mothership/mothershipd.sock").and_then(|mut s| {
++            s.write_all(req.as_bytes())?;
++            let mut reply = [0u8; 256];
++            s.read(&mut reply).map(|_| ())
++        });
++        if let Err(e) = r {
++            error!("mothershipd: vm.sleep {}: {}", vm, e);
++        }
++    });
++}
++
+ fn vcpu_loop(
+     mut run_mode: VmRunMode,
+     cpu_id: usize,
+@@ -446,6 +485,16 @@ fn vcpu_loop(
+                     info!("system crash event on vcpu {}", cpu_id);
+                     return ExitState::GuestPanic;
+                 }
++                #[cfg(target_arch = "aarch64")]
++                Ok(VcpuExit::SystemEventSuspend) => match psci_system_suspend(&*vcpu) {
++                    Ok(()) => {
++                        // parked as by `crosvm suspend`; `crosvm resume` wakes the guest at its resume entry
++                        info!("guest suspended (PSCI SYSTEM_SUSPEND) on vcpu {}", cpu_id);
++                        run_mode = VmRunMode::Suspending;
++                        mship_vm_sleep();
++                    }
++                    Err(e) => error!("PSCI SYSTEM_SUSPEND on vcpu {}: {:#}", cpu_id, e),
++                },
+                 Ok(VcpuExit::Debug) => {
+                     #[cfg(feature = "gdb")]
+                     if let Err(e) =

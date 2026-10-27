@@ -1,0 +1,8 @@
+[Unit]
+Description=Set the clock from an HTTP Date header, directly or via the dev PC proxy (mothershipOS)
+After=network.target systemd-networkd.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mship-system timesync

@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "name": "USB devices",
+  "platform": {
+    "id": "cuttlefish-arm64",
+    "version": "1.0"
+  },
+  "slots": {
+    "usb": {
+      "contract": "mship.usb",
+      "version": "1.0",
+      "required": false
+    }
+  },
+  "handover": {
+    "when_shown": [],
+    "while_running": [
+      "usb"
+    ]
+  }
+}

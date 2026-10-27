@@ -1,0 +1,9 @@
+[package]
+name = "mship-init"
+description = "The phone's initramfs init: USB dev link, then the mship-root switch (or the RAM host); nio-diag"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc.workspace = true

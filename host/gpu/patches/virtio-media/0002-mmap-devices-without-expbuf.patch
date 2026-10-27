@@ -1,0 +1,124 @@
+Patch virtio-media 0.0.8 (crates.io copy): MMAP buffers of devices that cannot export them.
+
+The V4L2 proxy maps a host buffer into the guest by exporting it as a dma-buf (VIDIOC_EXPBUF). Devices with
+vmalloc buffers, such as v4l2loopback (the cameras, mship.camera), cannot export, and the guest's mmap() failed
+with ENOTTY. Then the proxy now maps the session's own device file at the buffer's MMAP offset (from
+VIDIOC_QUERYBUF), through a mapper method that takes a file offset (VirtioMediaHostMemoryMapper::add_mapping_at;
+the default refuses non-zero offsets, crosvm implements it: crosvm patch 0008). The file only resolves its own
+buffers, so a session still maps nothing but its own. It also logs why a CAPTURE DQBUF failed (the guest only
+gets the errno).
+
+diff -ruN a/src/devices/v4l2_device_proxy.rs b/src/devices/v4l2_device_proxy.rs
+--- a/src/devices/v4l2_device_proxy.rs	2026-10-26 22:44:42.984093741 +0000
++++ b/src/devices/v4l2_device_proxy.rs	2026-10-27 02:15:27.077197630 +0000
+@@ -582,6 +582,8 @@
+                 Err(DqBufError::IoctlError(DqBufIoctlError::Eos)) => return Ok(()),
+                 Err(DqBufError::IoctlError(DqBufIoctlError::NotReady)) => return Ok(()),
+                 Err(e) => {
++                    // mothershipOS: say why, the guest only gets an errno
++                    error!("session {}: CAPTURE DQBUF failed: {:?}", session.id, e);
+                     let err = e.into_errno();
+                     self.evt_queue.send_error(session.id, err);
+                     return Err(DequeueBufferError(err));
+@@ -1313,13 +1315,31 @@
+                 ExpbufFlags::RDONLY
+             },
+         )
+-        .map_err(|e| e.into_errno())?;
++        .map_err(|e| e.into_errno());
+ 
+-        let (mapping_addr, mapping_size) = self
+-            .mmap_manager
+-            .create_mapping(offset, exported_fd.as_fd(), rw)
+-            // TODO: better error mapping?
+-            .map_err(|_| libc::EINVAL)?;
++        let (mapping_addr, mapping_size) = match exported_fd {
++            Ok(fd) => self
++                .mmap_manager
++                .create_mapping(offset, fd.as_fd(), rw)
++                // TODO: better error mapping?
++                .map_err(|_| libc::EINVAL)?,
++            // mothershipOS: a device that cannot export its buffers (v4l2loopback): map the session's own file at
++            // the buffer's MMAP offset (the file only resolves its own buffers, so the permission check holds)
++            Err(e) if e == libc::ENOTTY || e == libc::EINVAL => {
++                let buffer: v4l2r::ioctl::QueryBuffer =
++                    v4l2r::ioctl::querybuf(&*session.device, plane_info.queue, plane_info.index as usize)
++                        .map_err(|e| e.into_errno())?;
++                let host_offset = buffer
++                    .planes
++                    .get(plane_info.plane as usize)
++                    .ok_or(libc::EINVAL)?
++                    .mem_offset;
++                self.mmap_manager
++                    .create_mapping_at(offset, session.device.as_fd(), rw, host_offset as u64)
++                    .map_err(|_| libc::EINVAL)?
++            }
++            Err(e) => return Err(e),
++        };
+ 
+         plane_info.map_address = mapping_addr;
+         Ok((mapping_addr, mapping_size))
+diff -ruN a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs	2026-10-26 22:44:42.967093285 +0000
++++ b/src/lib.rs	2026-10-26 22:44:43.016094598 +0000
+@@ -127,6 +127,23 @@
+ 
+     /// Removes a guest mapping previously created at shared memory region offset `shm_offset`.
+     fn remove_mapping(&mut self, shm_offset: u64) -> Result<(), i32>;
++
++    /// mothershipOS: like `add_mapping`, but maps `buffer` from `file_offset` on: a V4L2 device file at a buffer's
++    /// MMAP offset, for devices that cannot export their buffers as dma-bufs. Mappers that cannot do that refuse it.
++    fn add_mapping_at(
++        &mut self,
++        buffer: BorrowedFd,
++        length: u64,
++        offset: u64,
++        file_offset: u64,
++        rw: bool,
++    ) -> Result<u64, i32> {
++        if file_offset == 0 {
++            self.add_mapping(buffer, length, offset, rw)
++        } else {
++            Err(libc::ENOTTY)
++        }
++    }
+ }
+ 
+ /// No-op implementation of `VirtioMediaHostMemoryMapper`. Can be used for testing purposes or when
+diff -ruN a/src/mmap.rs b/src/mmap.rs
+--- a/src/mmap.rs	2026-10-26 22:44:42.975093499 +0000
++++ b/src/mmap.rs	2026-10-26 22:44:43.016094598 +0000
+@@ -203,6 +203,18 @@
+         fd: BorrowedFd,
+         rw: bool,
+     ) -> Result<(u64, u64), CreateMappingError> {
++        self.create_mapping_at(offset, fd, rw, 0)
++    }
++
++    /// mothershipOS: `create_mapping` of `fd` from `file_offset` on (see
++    /// `VirtioMediaHostMemoryMapper::add_mapping_at`).
++    pub fn create_mapping_at(
++        &mut self,
++        offset: u32,
++        fd: BorrowedFd,
++        rw: bool,
++        file_offset: u64,
++    ) -> Result<(u64, u64), CreateMappingError> {
+         let buffer = self
+             .buffers
+             .binary_search_by_key(&offset, |b| b.offset)
+@@ -227,12 +239,13 @@
+             None => {
+                 let guest_addr = self
+                     .mapper
+-                    .add_mapping(
++                    .add_mapping_at(
+                         fd,
+                         // Always map the full buffer so we can reuse the mapping even with different
+                         // sizes.
+                         buffer.size as u64,
+                         buffer.offset as u64,
++                        file_offset,
+                         rw,
+                     )
+                     .map_err(CreateMappingError::MappingFailure)?;

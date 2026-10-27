@@ -1,0 +1,32 @@
+# mothershipOS nio host session. Panel = DSI-1, 1080x2520 portrait, ~410 ppi.
+include /etc/sway/config
+xwayland disable
+# bg = foot's background: it shows only in the terminal's top gap (the camera cutout)
+output DSI-1 mode 1080x2520@90Hz scale 2 bg #242424 solid_color
+input type:touch map_to_output DSI-1
+default_border none
+# no tabbed layout: its tab bar would sit over the shell (and a VM window); terminals have a workspace of their own
+workspace_layout default
+bar bar-0 mode invisible
+# the external display (USB-C DP alt mode) is never mothershipOS's: it's lent to a VM (hardware item display-ext;
+# mothershipd leases it to the VM's presenter); mothershipOS stays on the panel
+output DP-1 disable
+# workspace 1 = mothershipOS shell, workspace 2 = a VM shown as a window
+for_window [title="^crosvm$"] move container to workspace number 2
+# terminals: a workspace of their own, split (not tabbed: no tab bar over them); the shell shows the on-screen
+# keyboard while one is focused and goes back to workspace 1 when the last one closes; the assist key goes home too
+for_window [app_id="^foot$"] move container to workspace terminal, workspace terminal, layout splitv
+# the panel's camera cutout: the top of the terminal stays empty
+workspace terminal gaps top 60
+# on-screen keyboard (layer shell; the shell shows/hides it with SIGUSR2/SIGUSR1)
+exec wvkbd-mobintl --hidden -H 300 -L 220
+exec /usr/local/bin/mship-shell
+# assist key = home: take the hardware back to mothershipOS, or lend it to the running VM
+bindsym --locked XF86Search exec /usr/local/bin/mship home
+# power key = screen off/on (sleep follows via mothershipd); idle timeout from Settings › Display
+bindsym --locked XF86PowerOff exec /usr/local/bin/mship screen toggle
+exec /usr/local/bin/mship idle
+# hardware buttons go to the focused VM (its input bridge), not to pactl
+unbindsym --locked XF86AudioLowerVolume
+unbindsym --locked XF86AudioRaiseVolume
+unbindsym --locked XF86AudioMute

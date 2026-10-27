@@ -1,0 +1,70 @@
+virtio-gpu without a display at start (`--gpu ...,no-display=true` and no `displays`): the guest sees every
+scanout disconnected until `crosvm gpu add-displays` connects one (a monitor plugged in), the virtio-gpu display
+event then tells it, as a real hotplug. Without the option crosvm adds a default display, as before.
+
+--- a/devices/src/virtio/gpu/mod.rs
++++ b/devices/src/virtio/gpu/mod.rs
+@@ -932,7 +932,8 @@
+     rutabaga_server_descriptor: Option<RutabagaDescriptor>,
+     fence_handler: RutabagaFenceHandler,
+ ) -> RutabagaResult<Rutabaga> {
+-    let (display_width, display_height) = display_params[0].get_virtual_display_size();
++    let (display_width, display_height) =
++        display_params.first().cloned().unwrap_or_default().get_virtual_display_size();
+ 
+     // Only allow virglrenderer to fork its own render server when explicitly requested.
+     // Caller can enforce its own restrictions (e.g. not allowed when sandboxed) and set the
+@@ -1478,7 +1479,7 @@
+         #[cfg(any(target_os = "android", target_os = "linux"))] gpu_cgroup_path: Option<&PathBuf>,
+     ) -> Gpu {
+         let mut display_params = gpu_parameters.display_params.clone();
+-        if display_params.is_empty() {
++        if display_params.is_empty() && !gpu_parameters.no_display {
+             display_params.push(Default::default());
+         }
+ 
+--- a/devices/src/virtio/gpu/parameters.rs
++++ b/devices/src/virtio/gpu/parameters.rs
+@@ -57,6 +57,9 @@
+     pub audio_device_mode: AudioDeviceMode,
+     #[serde(rename = "displays")]
+     pub display_params: Vec<DisplayParameters>,
++    /// Start without any display when `displays` is empty (displays are added later with `crosvm gpu
++    /// add-displays`): the guest sees every scanout disconnected until then.
++    pub no_display: bool,
+     // `width` and `height` are supported for CLI backwards compatibility.
+     #[serde(rename = "width")]
+     pub __width_compat: Option<u32>,
+@@ -103,6 +106,7 @@
+             max_num_displays: default_max_num_displays(),
+             audio_device_mode: default_audio_device_mode(),
+             display_params: vec![],
++            no_display: false,
+             __width_compat: None,
+             __height_compat: None,
+             renderer_use_egl: true,
+--- a/src/crosvm/gpu_config.rs
++++ b/src/crosvm/gpu_config.rs
+@@ -61,14 +61,18 @@
+             ));
+         }
+ 
+-        // Add a default display if no display is specified.
+-        if gpu_parameters.display_params.is_empty() {
++        // Add a default display if no display is specified (unless asked to start without one).
++        if gpu_parameters.display_params.is_empty() && !gpu_parameters.no_display {
+             gpu_parameters.display_params.push(Default::default());
+         }
+ 
+         let is_4k_uhd_enabled = false;
+-        let (width, height) =
+-            gpu_parameters.display_params[0].get_virtual_display_size_4k_uhd(is_4k_uhd_enabled);
++        let (width, height) = gpu_parameters
++            .display_params
++            .first()
++            .cloned()
++            .unwrap_or_default()
++            .get_virtual_display_size_4k_uhd(is_4k_uhd_enabled);
+         cfg.display_input_width = Some(width);
+         cfg.display_input_height = Some(height);
+     }

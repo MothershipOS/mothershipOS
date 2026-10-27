@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "name": "Mobile network",
+  "platform": {
+    "id": "cuttlefish-arm64",
+    "version": "1.0"
+  },
+  "slots": {
+    "modem": {
+      "contract": "mship.modem",
+      "version": "1.0",
+      "required": false
+    }
+  },
+  "handover": {
+    "when_shown": [],
+    "while_running": [
+      "cellular"
+    ]
+  }
+}

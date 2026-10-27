@@ -1,0 +1,1 @@
+{"schema": 1, "name": "x", "platform": {"id": "efi-virt-arm64", "version": "1.0"}, "boot": {"disk": "../../etc/shadow"}}

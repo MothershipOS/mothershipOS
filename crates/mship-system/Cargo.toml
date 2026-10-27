@@ -1,0 +1,15 @@
+[package]
+name = "mship-system"
+description = "mothershipOS system jobs: VM networking, RTC offset, time sync, power key re-arm, GPU eviction off"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mship-core.workspace = true
+libc.workspace = true
+sha2 = "0.10"
+flate2 = "1"
+ureq = "3"
+serde_json.workspace = true
+tar = "0.4"

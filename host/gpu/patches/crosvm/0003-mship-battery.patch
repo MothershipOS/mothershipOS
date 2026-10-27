@@ -1,0 +1,287 @@
+Patch crosvm: goldfish battery fed by the host (mship.battery).
+
+crosvm's goldfish battery gets live values only from a power monitor, and the only monitor upstream is
+ChromeOS powerd (D-Bus). This adds the `mship` monitor: it reads the battery state that mship-battery
+publishes on /run/mothership/battery.sock (MSHIP_BATTERY_SOCK overrides) and reconnects when the service
+restarts. It also passes temperature, health and the FULL status to the guest. Upstream crosvm reports
+temperature as 0, health as unknown and maps FULL to NOT_CHARGING.
+
+diff --git a/arch/src/sys/linux.rs b/arch/src/sys/linux.rs
+index f6a171214..0bbe9c1c5 100644
+--- a/arch/src/sys/linux.rs
++++ b/arch/src/sys/linux.rs
+@@ -70,8 +70,13 @@ pub fn add_goldfish_battery(
+             as Box<dyn power_monitor::CreatePowerClientFn>),
+     );
+ 
++    // mothershipOS: the host service mship-battery (patch-crosvm-battery.py)
+     #[cfg(not(feature = "power-monitor-powerd"))]
+-    let (create_monitor, create_client) = (None, None);
++    let (create_monitor, create_client) = (
++        Some(Box::new(power_monitor::mship::MshipMonitor::connect)
++            as Box<dyn power_monitor::CreatePowerMonitorFn>),
++        None,
++    );
+ 
+     let irq_evt = devices::IrqLevelEvent::new().map_err(DeviceRegistrationError::EventCreate)?;
+ 
+diff --git a/devices/src/bat.rs b/devices/src/bat.rs
+index e2e451976..7ee9fc4fd 100644
+--- a/devices/src/bat.rs
++++ b/devices/src/bat.rs
+@@ -84,6 +84,8 @@ struct GoldfishBatteryState {
+     current: u32,
+     charge_counter: u32,
+     charge_full: u32,
++    // mothershipOS
++    temperature: u32,
+     // bat_config is used for goldfish battery to report fake battery to the guest.
+     bat_config: BatConfig,
+ }
+@@ -134,6 +136,9 @@ impl GoldfishBatteryState {
+ 
+     create_battery_func!(set_charge_full, charge_full, u32, BATTERY_STATUS_CHANGED);
+ 
++    // mothershipOS
++    create_battery_func!(set_temperature, temperature, u32, BATTERY_STATUS_CHANGED);
++
+     create_battery_func!(set_bat_config, bat_config, BatConfig, BATTERY_INT_MASK);
+ }
+ 
+@@ -193,6 +198,8 @@ const BATTERY_STATUS_VAL_UNKNOWN: u32 = 0;
+ const BATTERY_STATUS_VAL_CHARGING: u32 = 1;
+ const BATTERY_STATUS_VAL_DISCHARGING: u32 = 2;
+ const BATTERY_STATUS_VAL_NOT_CHARGING: u32 = 3;
++// mothershipOS
++const BATTERY_STATUS_VAL_FULL: u32 = 4;
+ 
+ /// Goldfish Battery health
+ const BATTERY_HEALTH_VAL_UNKNOWN: u32 = 0;
+@@ -327,12 +334,17 @@ fn command_monitor(
+                                 BatteryStatus::Charging => BATTERY_STATUS_VAL_CHARGING,
+                                 BatteryStatus::Discharging => BATTERY_STATUS_VAL_DISCHARGING,
+                                 BatteryStatus::NotCharging => BATTERY_STATUS_VAL_NOT_CHARGING,
++                                BatteryStatus::Full => BATTERY_STATUS_VAL_FULL,
+                             };
+                             inject_irq |= bat_state.set_status(battery_status);
+                             inject_irq |= bat_state.set_voltage(battery_data.voltage);
+                             inject_irq |= bat_state.set_current(battery_data.current);
+                             inject_irq |= bat_state.set_charge_counter(battery_data.charge_counter);
+                             inject_irq |= bat_state.set_charge_full(battery_data.charge_full);
++                            // mothershipOS: temperature, health, present again after a removal
++                            inject_irq |= bat_state.set_temperature(battery_data.temperature as u32);
++                            inject_irq |= bat_state.set_health(battery_data.health);
++                            inject_irq |= bat_state.set_present(1);
+                         }
+                         None => {
+                             inject_irq |= bat_state.set_present(0);
+@@ -394,6 +406,7 @@ impl GoldfishBattery {
+             current: 0,
+             charge_counter: 0,
+             charge_full: 0,
++            temperature: 0,
+             bat_config: BatConfig::Real,
+         }));
+ 
+@@ -500,6 +513,7 @@ impl GoldfishBattery {
+                             BatteryStatus::Charging => BATTERY_STATUS_VAL_CHARGING,
+                             BatteryStatus::Discharging => BATTERY_STATUS_VAL_DISCHARGING,
+                             BatteryStatus::NotCharging => BATTERY_STATUS_VAL_NOT_CHARGING,
++                            BatteryStatus::Full => BATTERY_STATUS_VAL_FULL,
+                         };
+                         bat_state.set_status(battery_status);
+                         bat_state.set_voltage(battery_data.voltage);
+@@ -595,7 +609,7 @@ impl BusDevice for GoldfishBattery {
+                 std::cmp::min(max_capacity, self.state.lock().capacity)
+             }
+             BATTERY_VOLTAGE => self.state.lock().voltage,
+-            BATTERY_TEMP => 0,
++            BATTERY_TEMP => self.state.lock().temperature,
+             BATTERY_CHARGE_COUNTER => self.state.lock().charge_counter,
+             BATTERY_VOLTAGE_MAX => 0,
+             BATTERY_CURRENT_MAX => 0,
+diff --git a/power_monitor/src/lib.rs b/power_monitor/src/lib.rs
+index 7eac22a72..206fa0dff 100644
+--- a/power_monitor/src/lib.rs
++++ b/power_monitor/src/lib.rs
+@@ -38,6 +38,10 @@ pub struct BatteryData {
+     pub charge_counter: u32,
+     /// Battery full charge counter in microampere hours.
+     pub charge_full: u32,
++    /// mothershipOS: battery temperature in tenths of a degree Celsius.
++    pub temperature: i32,
++    /// mothershipOS: Linux POWER_SUPPLY_HEALTH_* value (0 = unknown).
++    pub health: u32,
+ }
+ 
+ #[derive(Clone, Copy, Debug)]
+@@ -46,6 +50,8 @@ pub enum BatteryStatus {
+     Charging,
+     Discharging,
+     NotCharging,
++    /// mothershipOS
++    Full,
+ }
+ 
+ pub trait CreatePowerMonitorFn:
+@@ -68,6 +74,9 @@ impl<T> CreatePowerClientFn for T where
+ {
+ }
+ 
++// mothershipOS: battery state from the host service (mship.battery)
++pub mod mship;
++
+ #[cfg(feature = "powerd")]
+ pub mod powerd;
+ 
+diff --git a/power_monitor/src/mship.rs b/power_monitor/src/mship.rs
+new file mode 100644
+index 000000000..10e0af806
+--- /dev/null
++++ b/power_monitor/src/mship.rs
+@@ -0,0 +1,132 @@
++// mothershipOS (host/gpu/patch-crosvm-battery.py): battery state from the host's mship-battery service.
++//
++// One line per update on a Unix stream socket, `key=value` separated by spaces, e.g.
++// `ac=1 present=1 status=charging percent=9 voltage=3932362 current=1025390 charge_counter=450000
++// charge_full=5000000 temp=375 health=good` (µV, µA with + = charging, µAh, 0.1 °C). Unknown keys are ignored.
++
++use std::error::Error;
++use std::io::BufRead;
++use std::io::BufReader;
++use std::os::unix::net::UnixStream;
++use std::sync::Arc;
++use std::sync::Mutex;
++use std::time::Duration;
++
++use base::AsRawDescriptor;
++use base::Event;
++use base::ReadNotifier;
++
++use crate::BatteryData;
++use crate::BatteryStatus;
++use crate::PowerData;
++use crate::PowerMonitor;
++
++pub const DEFAULT_SOCKET: &str = "/run/mothership/battery.sock";
++
++pub struct MshipMonitor {
++    event: Event,
++    latest: Arc<Mutex<Option<PowerData>>>,
++}
++
++impl MshipMonitor {
++    pub fn connect() -> std::result::Result<Box<dyn PowerMonitor>, Box<dyn Error>> {
++        let path =
++            std::env::var("MSHIP_BATTERY_SOCK").unwrap_or_else(|_| DEFAULT_SOCKET.to_string());
++        let event = Event::new()?;
++        let signal = event.try_clone()?;
++        let latest = Arc::new(Mutex::new(None));
++        let shared = latest.clone();
++        // the reader thread survives service restarts; the battery worker only waits on `event`
++        std::thread::Builder::new()
++            .name("mship_battery".into())
++            .spawn(move || loop {
++                if let Ok(stream) = UnixStream::connect(&path) {
++                    for line in BufReader::new(stream).lines() {
++                        let Ok(line) = line else { break };
++                        if let Some(data) = parse(&line) {
++                            *shared.lock().unwrap() = Some(data);
++                            let _ = signal.signal();
++                        }
++                    }
++                }
++                std::thread::sleep(Duration::from_secs(2));
++            })?;
++        Ok(Box::new(MshipMonitor { event, latest }))
++    }
++}
++
++impl ReadNotifier for MshipMonitor {
++    fn get_read_notifier(&self) -> &dyn AsRawDescriptor {
++        &self.event
++    }
++}
++
++impl PowerMonitor for MshipMonitor {
++    fn read_message(&mut self) -> std::result::Result<Option<PowerData>, Box<dyn Error>> {
++        self.event.wait()?;
++        Ok(self.latest.lock().unwrap().take())
++    }
++}
++
++// Linux POWER_SUPPLY_HEALTH_* (the guest's goldfish_battery driver passes the register through)
++fn health(v: &str) -> u32 {
++    match v {
++        "good" => 1,
++        "overheat" => 2,
++        "dead" => 3,
++        "over-voltage" => 4,
++        "unspecified-failure" => 5,
++        "cold" => 6,
++        "watchdog-timer-expire" => 7,
++        "safety-timer-expire" => 8,
++        "over-current" => 9,
++        "calibration-required" => 10,
++        "warm" => 11,
++        "cool" => 12,
++        "hot" => 13,
++        _ => 0,
++    }
++}
++
++fn parse(line: &str) -> Option<PowerData> {
++    let mut ac_online = false;
++    let mut present = true;
++    let mut b = BatteryData {
++        status: BatteryStatus::Unknown,
++        percent: 0,
++        voltage: 0,
++        current: 0,
++        charge_counter: 0,
++        charge_full: 0,
++        temperature: 0,
++        health: 0,
++    };
++    for kv in line.split_whitespace() {
++        let (k, v) = kv.split_once('=')?;
++        match k {
++            "ac" => ac_online = v == "1",
++            "present" => present = v == "1",
++            "status" => {
++                b.status = match v {
++                    "charging" => BatteryStatus::Charging,
++                    "discharging" => BatteryStatus::Discharging,
++                    "not-charging" => BatteryStatus::NotCharging,
++                    "full" => BatteryStatus::Full,
++                    _ => BatteryStatus::Unknown,
++                }
++            }
++            "percent" => b.percent = v.parse::<u32>().ok()?.min(100),
++            "voltage" => b.voltage = v.parse().ok()?,
++            "current" => b.current = v.parse::<i32>().ok()? as u32,
++            "charge_counter" => b.charge_counter = v.parse().ok()?,
++            "charge_full" => b.charge_full = v.parse().ok()?,
++            "temp" => b.temperature = v.parse().ok()?,
++            "health" => b.health = health(v),
++            _ => {}
++        }
++    }
++    Some(PowerData {
++        ac_online,
++        battery: present.then_some(b),
++    })
++}
+diff --git a/power_monitor/src/powerd.rs b/power_monitor/src/powerd.rs
+index c60571941..6e9e48b09 100644
+--- a/power_monitor/src/powerd.rs
++++ b/power_monitor/src/powerd.rs
+@@ -54,6 +54,8 @@ impl From<PowerSupplyProperties> for PowerData {
+                 current,
+                 charge_counter,
+                 charge_full,
++                temperature: 0, // mothershipOS
++                health: 0,
+             })
+         } else {
+             None

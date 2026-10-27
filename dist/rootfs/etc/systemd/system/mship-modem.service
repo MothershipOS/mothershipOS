@@ -1,0 +1,15 @@
+[Unit]
+Description=mothershipOS modem (mship.modem: the SDX55's files, NV, SIM and mobile data; the modem for VMs)
+# the modem boots from the kernel's Sahara server and asks for its TFTP service right away
+DefaultDependencies=no
+After=local-fs.target systemd-modules-load.service
+Before=network.target
+Conflicts=tqftpserv.service
+
+[Service]
+ExecStart=/usr/local/sbin/mship-modem
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

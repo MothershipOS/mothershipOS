@@ -1,0 +1,12 @@
+[package]
+name = "mship-egl-shim"
+description = "libEGL.so for Cuttlefish's crosvm/gfxstream: hides EGL_ANDROID_blob_cache (the gfxstream fallback)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+libc.workspace = true

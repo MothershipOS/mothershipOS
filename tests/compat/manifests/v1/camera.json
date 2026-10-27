@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "name": "Cameras",
+  "platform": {
+    "id": "cuttlefish-arm64",
+    "version": "1.0"
+  },
+  "slots": {
+    "camera": {
+      "contract": "mship.camera",
+      "version": "1.0",
+      "required": false
+    }
+  },
+  "handover": {
+    "when_shown": [],
+    "while_running": [
+      "cameras"
+    ]
+  }
+}

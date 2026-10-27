@@ -1,0 +1,10 @@
+[Unit]
+Description=mothershipOS battery state (mship.battery: the phone's battery for every VM)
+
+[Service]
+ExecStart=/usr/local/sbin/mship-battery
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

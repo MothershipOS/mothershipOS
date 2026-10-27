@@ -1,0 +1,138 @@
+A power button for aarch64 VMs (they have no ACPI): a virtio-input device with KEY_POWER only, pressed by
+`crosvm powerbtn`.
+
+diff --git a/devices/src/virtio/input/defaults.rs b/devices/src/virtio/input/defaults.rs
+index 481904b50..23014baa0 100644
+--- a/devices/src/virtio/input/defaults.rs
++++ b/devices/src/virtio/input/defaults.rs
+@@ -78,6 +78,20 @@ pub fn new_keyboard_config(idx: u32) -> VirtioInputConfig {
+     )
+ }
+ 
++/// Instantiates a VirtioInputConfig object for a power button: KEY_POWER only.
++pub fn new_power_button_config() -> VirtioInputConfig {
++    let mut supported_events: BTreeMap<u16, virtio_input_bitmap> = BTreeMap::new();
++    supported_events.insert(EV_KEY, virtio_input_bitmap::from_bits(&[KEY_POWER]));
++    VirtioInputConfig::new(
++        virtio_input_device_ids::new(0, 0, 0, 0),
++        "Crosvm Power Button".to_string(),
++        "virtio-power-button".to_string(),
++        virtio_input_bitmap::new([0u8; 128]),
++        supported_events,
++        BTreeMap::new(),
++    )
++}
++
+ /// Instantiates a VirtioInputConfig object with the default configuration for a collection of
+ /// switches.
+ pub fn new_switches_config(idx: u32) -> VirtioInputConfig {
+diff --git a/devices/src/virtio/input/mod.rs b/devices/src/virtio/input/mod.rs
+index 8e805e38a..fd6425318 100644
+--- a/devices/src/virtio/input/mod.rs
++++ b/devices/src/virtio/input/mod.rs
+@@ -829,6 +829,18 @@ where
+     ))
+ }
+ 
++/// Creates a new virtio power button (KEY_POWER only): the VM's power button where it has no ACPI.
++pub fn new_power_button<T>(source: T, virtio_features: u64) -> Result<Input<SocketEventSource<T>>>
++where
++    T: Read + Write + AsRawDescriptor + Send + 'static,
++{
++    Ok(Input::new(
++        defaults::new_power_button_config(),
++        Some(SocketEventSource::new(source)),
++        virtio_features,
++    ))
++}
++
+ /// Creates a new virtio device for switches.
+ pub fn new_switches<T>(
+     idx: u32,
+diff --git a/src/crosvm/sys/linux.rs b/src/crosvm/sys/linux.rs
+index e48e1ba07..94857d3be 100644
+--- a/src/crosvm/sys/linux.rs
++++ b/src/crosvm/sys/linux.rs
+@@ -653,6 +653,8 @@ fn create_virtio_devices(
+         };
+         devs.push(("input", input_dev));
+     }
++    #[cfg(target_arch = "aarch64")]
++    devs.push(("input", create_power_button_device(cfg.protection_type)?));
+ 
+     #[cfg(feature = "balloon")]
+     if cfg.balloon {
+@@ -2528,6 +2530,13 @@ fn run_vm(
+     )
+     .context("the architecture failed to build the vm")?;
+ 
++    #[cfg(target_arch = "aarch64")]
++    if linux.pm.is_none() {
++        if let Some(button) = POWER_BUTTON.lock().unwrap().take() {
++            linux.pm = Some(Arc::new(Mutex::new(PowerButton(button))));
++        }
++    }
++
+     for tube in linux.vm_request_tubes.drain(..) {
+         add_control_tube(AnyControlTube::Vm(tube));
+     }
+diff --git a/src/crosvm/sys/linux/device_helpers.rs b/src/crosvm/sys/linux/device_helpers.rs
+index bdc36fd52..15359bf1a 100644
+--- a/src/crosvm/sys/linux/device_helpers.rs
++++ b/src/crosvm/sys/linux/device_helpers.rs
+@@ -477,6 +477,55 @@ pub fn create_keyboard_device<T: IntoUnixStream>(
+     })
+ }
+ 
++/// The host end of the power button device (see [`create_power_button_device`]), taken by the VM's
++/// [`PowerButton`] once the VM is built.
++#[cfg(target_arch = "aarch64")]
++pub static POWER_BUTTON: std::sync::Mutex<Option<UnixStream>> = std::sync::Mutex::new(None);
++
++/// aarch64 VMs have no ACPI power button: a virtio-input device with KEY_POWER only, so `crosvm
++/// powerbtn` asks the guest to shut down as on x86 (the guest's input stack sees a power key).
++#[cfg(target_arch = "aarch64")]
++pub fn create_power_button_device(protection_type: ProtectionType) -> DeviceResult {
++    let (device_end, host_end) = UnixStream::pair().context("power button socket")?;
++    let dev = virtio::input::new_power_button(device_end, virtio::base_features(protection_type))
++        .context("failed to set up power button")?;
++    *POWER_BUTTON.lock().unwrap() = Some(host_end);
++    Ok(VirtioDeviceStub {
++        dev: Box::new(dev),
++        jail: None,
++    })
++}
++
++/// The VM's power button (`crosvm powerbtn`): a press and release of KEY_POWER on the power button
++/// device.
++#[cfg(target_arch = "aarch64")]
++pub struct PowerButton(pub UnixStream);
++
++#[cfg(target_arch = "aarch64")]
++impl vm_control::PmResource for PowerButton {
++    fn pwrbtn_evt(&mut self) {
++        use std::io::Write;
++        // struct virtio_input_event: type, code (le16), value (le32)
++        let event = |typ: u16, code: u16, value: i32| {
++            let mut b = [0u8; 8];
++            b[0..2].copy_from_slice(&typ.to_le_bytes());
++            b[2..4].copy_from_slice(&code.to_le_bytes());
++            b[4..8].copy_from_slice(&value.to_le_bytes());
++            b
++        };
++        const EV_SYN: u16 = 0;
++        const EV_KEY: u16 = 1;
++        const KEY_POWER: u16 = 116;
++        let mut events = Vec::new();
++        for (typ, code, value) in [(EV_KEY, KEY_POWER, 1), (EV_SYN, 0, 0), (EV_KEY, KEY_POWER, 0), (EV_SYN, 0, 0)] {
++            events.extend(event(typ, code, value));
++        }
++        if let Err(e) = self.0.write_all(&events) {
++            error!("power button: {}", e);
++        }
++    }
++}
++
+ pub fn create_switches_device<T: IntoUnixStream>(
+     protection_type: ProtectionType,
+     jail_config: Option<&JailConfig>,

@@ -1,0 +1,28 @@
+xHCI: a halted controller writes no events (xHCI 4.9.4). A guest resetting it on resume rebuilds its event ring
+meanwhile, and an event written into it crashed the guest.
+
+diff --git a/devices/src/usb/xhci/interrupter.rs b/devices/src/usb/xhci/interrupter.rs
+index f10c5344b..4c1b63880 100644
+--- a/devices/src/usb/xhci/interrupter.rs
++++ b/devices/src/usb/xhci/interrupter.rs
+@@ -27,6 +27,7 @@ use super::xhci_regs::XhciRegs;
+ use super::xhci_regs::ERDP_EVENT_HANDLER_BUSY;
+ use super::xhci_regs::IMAN_INTERRUPT_PENDING;
+ use super::xhci_regs::USB_STS_EVENT_INTERRUPT;
++use super::xhci_regs::USB_STS_HALTED;
+ use crate::register_space::Register;
+ 
+ #[sorted]
+@@ -88,6 +89,12 @@ impl Interrupter {
+ 
+     /// Add event to event ring.
+     fn add_event(&mut self, trb: Trb) -> Result<()> {
++        // A halted controller writes no events (xHCI 4.9.4: port changes stay in PORTSC, where the driver finds
++        // them when it runs the controller again). The driver may be rebuilding the event ring meanwhile (a reset
++        // on resume): an event written into it then crashes the guest.
++        if self.usbsts.get_value() & USB_STS_HALTED != 0 {
++            return Ok(());
++        }
+         self.event_ring.add_event(trb).map_err(Error::AddEvent)?;
+         self.interrupt_if_needed()
+     }

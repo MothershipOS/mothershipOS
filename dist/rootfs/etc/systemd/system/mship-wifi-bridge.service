@@ -1,0 +1,13 @@
+[Unit]
+Description=mothershipOS Wi-Fi bridge (mship.wifi: band interfaces for VMs)
+After=mship-vm-net.service network.target
+Wants=mship-vm-net.service
+
+[Service]
+ExecStartPre=/sbin/modprobe -a sch_ingress cls_basic act_mirred
+ExecStart=/usr/local/sbin/mship-wifi-bridge
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

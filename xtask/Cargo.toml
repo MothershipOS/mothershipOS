@@ -1,0 +1,19 @@
+[package]
+name = "xtask"
+description = "mothershipOS developer tasks: build for the phone, test, package a release (cargo xtask)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+tar = "0.4"
+flate2 = "1"
+ruzstd = "0.8"
+fdt = "0.1"
+ureq = "3"
+sha2 = "0.10"
+xz2 = { version = "0.1", features = ["static"] }

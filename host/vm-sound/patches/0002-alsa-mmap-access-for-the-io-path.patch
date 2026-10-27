@@ -1,0 +1,17 @@
+mothershipOS: the playback I/O path (used whenever the device has no direct mmap, e.g. a plug/dmix chain) writes
+with alsa-lib's mmap (snd_pcm_mmap_begin), which needs an mmap access type: with RW access it fails with EBADFD
+("Unknown errno (77)") and no sound plays. A hw device let it pass. Capture's I/O path reads with snd_pcm_readi,
+which needs RW access: keep that for capture.
+
+--- a/src/audio_backends/alsa.rs
++++ b/src/audio_backends/alsa.rs
+@@ -116,5 +116,8 @@
+             })?;
+ 
+-            hwp.set_access(Access::RWInterleaved)?;
++            hwp.set_access(match s.direction {
++                Direction::Output => Access::MMapInterleaved,
++                Direction::Input => Access::RWInterleaved,
++            })?;
+ 
+             let frame_size = u32::from(s.params.channels)

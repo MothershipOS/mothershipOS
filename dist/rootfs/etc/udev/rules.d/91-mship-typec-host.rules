@@ -1,0 +1,3 @@
+# a PD partner on a USB-C port: become the USB host if it left us as the device (it waits for the PD contract:
+# out of udev's way)
+ACTION=="add", SUBSYSTEM=="typec", KERNEL=="port[0-9]*-partner", RUN+="/usr/bin/systemd-run --no-block --quiet /usr/local/sbin/mship-system typec-host %k"

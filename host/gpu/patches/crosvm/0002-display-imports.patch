@@ -1,0 +1,40 @@
+Patch crosvm: release display imports of freed scanout buffers.
+
+A guest framebuffer flushed to the Wayland display is imported once (a wl_buffer from a dmabuf, kept in
+VirtioGpuResource.display_import). unref_resource dropped the resource without releasing that import, and the
+Wayland backend's release_import took (surface_id, import_id) while GpuDisplay passes (import_id, surface_id), so it
+removed the wrong entry anyway. The display context holds 64 dmabufs: after the guest compositor had gone through
+64 framebuffers (fullscreen video, direct scanout, resizes), every flush failed with "failed to add dmabuf to
+context" and the VM's screen froze for good while the guest ran on. Release the import when the guest frees the
+resource, and take the arguments in the order the caller passes them.
+
+diff --git a/devices/src/virtio/gpu/virtio_gpu.rs b/devices/src/virtio/gpu/virtio_gpu.rs
+index 7592c9b10..d9b01921f 100644
+--- a/devices/src/virtio/gpu/virtio_gpu.rs
++++ b/devices/src/virtio/gpu/virtio_gpu.rs
+@@ -1066,6 +1066,12 @@ impl VirtioGpu {
+             self.rutabaga.unmap(resource_id)?;
+         }
+ 
++        // mothershipOS: free the display's import of a scanout buffer the guest no longer uses (the Wayland
++        // backend keeps 64; leaking them froze the screen once they ran out)
++        if let Some(import_id) = resource.display_import {
++            self.display.borrow_mut().release_import(import_id, 0);
++        }
++
+         self.rutabaga.unref_resource(resource_id)?;
+         Ok(OkNoData)
+     }
+diff --git a/gpu_display/src/gpu_display_wl.rs b/gpu_display/src/gpu_display_wl.rs
+index d7b16f63b..9409dbeab 100644
+--- a/gpu_display/src/gpu_display_wl.rs
++++ b/gpu_display/src/gpu_display_wl.rs
+@@ -485,7 +485,7 @@ impl DisplayT for DisplayWl {
+         }
+     }
+ 
+-    fn release_import(&mut self, _surface_id: u32, import_id: u32) {
++    fn release_import(&mut self, import_id: u32, _surface_id: u32) {	// mothershipOS: as GpuDisplay passes them
+         self.dmabufs.remove(&import_id);
+     }
+ }

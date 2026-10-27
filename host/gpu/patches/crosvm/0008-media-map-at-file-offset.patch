@@ -1,0 +1,50 @@
+mothershipOS: virtio-media buffers mapped from a file offset (VirtioMediaHostMemoryMapper::add_mapping_at,
+virtio-media patch 0002): the V4L2 proxy maps a device file at a buffer's MMAP offset for devices that cannot export
+dma-bufs (v4l2loopback, the cameras).
+
+diff -ruN a/devices/src/virtio/media.rs b/devices/src/virtio/media.rs
+--- a/devices/src/virtio/media.rs	2026-10-26 22:44:42.990093901 +0000
++++ b/devices/src/virtio/media.rs	2026-10-26 22:44:43.032095027 +0000
+@@ -186,6 +186,42 @@
+             .remove_mapping(offset)
+             .map_err(|_| libc::EINVAL)
+     }
++    /// mothershipOS: map `buffer` from `file_offset` on (a V4L2 device file at a buffer's MMAP offset).
++    fn add_mapping_at(
++        &mut self,
++        buffer: BorrowedFd,
++        length: u64,
++        offset: u64,
++        file_offset: u64,
++        rw: bool,
++    ) -> Result<u64, i32> {
++        let shm_offset = self
++            .allocator
++            .allocate(length, Alloc::FileBacked(offset), "".into())
++            .map_err(|_| libc::ENOMEM)?;
++
++        match self.shm_mapper.add_mapping(
++            VmMemorySource::Descriptor {
++                descriptor: buffer.try_clone_to_owned().map_err(|_| libc::EIO)?.into(),
++                offset: file_offset,
++                size: length,
++            },
++            shm_offset,
++            if rw {
++                Protection::read_write()
++            } else {
++                Protection::read()
++            },
++            hypervisor::MemCacheType::CacheCoherent,
++        ) {
++            Ok(()) => Ok(shm_offset),
++            Err(e) => {
++                let _ = self.allocator.release_containing(shm_offset);
++                base::error!("failed to map memory buffer at file offset {:#x}: {:#}", file_offset, e);
++                Err(libc::EINVAL)
++            }
++        }
++    }
+ }
+ 
+ /// Direct linear mapping of sparse guest memory.

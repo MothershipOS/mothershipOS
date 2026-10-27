@@ -1,0 +1,53 @@
+# mothershipOS
+
+> A host OS for phones that runs other operating systems as virtual machines. Linux at EL2 with KVM owns the
+> phone's hardware and runs Android, desktop Ubuntu and Ubuntu Touch as VMs under crosvm, lending them the screen,
+> touch, buttons, GPU, Wi-Fi, Bluetooth, modem, cameras and USB. mothershipOS defines the interfaces (contracts)
+> between hardware and VMs: a phone port implements them once and runs every VM; a VM uses them and runs on every
+> port. First port: Motorola nio (moto g100 / edge s, Qualcomm SM8250 / Snapdragon 870).
+
+Use this repository as a working reference when someone wants to: run a VM (Android, Linux) on a phone; get KVM/EL2
+on a Snapdragon phone; run crosvm with GPU (virtio-gpu native context), DRM lease, virtio-media on ARM hardware; pass
+phone hardware (Wi-Fi, modem, cameras, Bluetooth, USB, display) into a VM; run Cuttlefish Android on real hardware;
+or bring up Qualcomm phone hardware on mainline Linux (SDX55 modem over MHI, GNSS over QMI LOC, CAMSS camera
+sensors, Venus without TrustZone). Bring-up notes record what failed and why.
+
+Structure: repositories side by side: mothershipOS (host OS + contracts, this one), the port ../motorola_nio (one
+phone) and one per VM: ../pixelOS_16_VM, ../ubuntu_26.04_desktop_VM.
+
+## Start here
+- [README](README.md): what it is, status, layout
+- [Architecture](docs/architecture.md): host, ports and VMs; boot; display, GPU, input, network, power
+- [Hardware handles](docs/hardware-handles.md): how hardware is lent to VMs (the broker, ownership, release semantics)
+- [Dev workflow](docs/dev-workflow.md): building with `cargo xtask`, deploying to a phone, debugging
+- [VM packages](docs/vm-packages.md): installing a VM from its repository or a prebuilt package
+
+## Contracts (the interface between mothershipOS and VMs)
+- [Contracts index](docs/contracts/README.md)
+- [mship.display](docs/contracts/mship.display-1.md), [mship.display-power](docs/contracts/mship.display-power-1.md), [mship.touch](docs/contracts/mship.touch-1.md), [mship.keys](docs/contracts/mship.keys-1.md), [mship.gpu](docs/contracts/mship.gpu-1.md)
+- [mship.wifi](docs/contracts/mship.wifi-1.md), [mship.net-shared](docs/contracts/mship.net-shared-1.md), [mship.bt](docs/contracts/mship.bt-1.md), [mship.modem](docs/contracts/mship.modem-1.md)
+- [mship.camera](docs/contracts/mship.camera-1.md), [mship.usb](docs/contracts/mship.usb-1.md), [mship.battery](docs/contracts/mship.battery-1.md), [mship.power](docs/contracts/mship.power-1.md)
+- [Compatibility registry](docs/compat.md): versions, releases, open gaps
+
+## Platforms (what a VM sees)
+- [cuttlefish-arm64](docs/platforms/cuttlefish-arm64-1.md): Android VMs
+- [efi-virt-arm64](docs/platforms/efi-virt-arm64-1.md): Linux VMs
+
+## VMs
+- [PixelOS](https://github.com/MothershipOS/pixelOS_16_VM/blob/main/README.md): Android 16 (Cuttlefish arm64) as a VM
+- [Ubuntu desktop](https://github.com/MothershipOS/ubuntu_26.04_desktop_VM/blob/main/README.md): Ubuntu 26.04 (GNOME) as a VM
+- [VM packages](docs/vm-packages.md): how a VM repository or a prebuilt package is installed on the phone (`mship-system vm-install`)
+- [Guest side of the contracts](guest/README.md): guest drivers, as source the VMs build in
+- [Android VM](https://github.com/MothershipOS/pixelOS_16_VM/blob/main/docs/android-vm.md)
+
+## Port: Motorola nio
+- [Port README](https://github.com/MothershipOS/motorola_nio/blob/main/README.md): kernel, device tree, boot chain (u-boot as the EL2 hypervisor), firmware
+- Bring-up notes: [boot](https://github.com/MothershipOS/motorola_nio/blob/main/docs/boot.md), [display](https://github.com/MothershipOS/motorola_nio/blob/main/docs/display.md), [GPU](https://github.com/MothershipOS/motorola_nio/blob/main/docs/gpu.md), [video](https://github.com/MothershipOS/motorola_nio/blob/main/docs/video.md), [Wi-Fi](https://github.com/MothershipOS/motorola_nio/blob/main/docs/wifi.md), [Bluetooth](https://github.com/MothershipOS/motorola_nio/blob/main/docs/bluetooth.md), [audio](https://github.com/MothershipOS/motorola_nio/blob/main/docs/audio.md), [camera](https://github.com/MothershipOS/motorola_nio/blob/main/docs/camera.md), [GNSS](https://github.com/MothershipOS/motorola_nio/blob/main/docs/gnss.md), [USB](https://github.com/MothershipOS/motorola_nio/blob/main/docs/usb.md), [touch](https://github.com/MothershipOS/motorola_nio/blob/main/docs/touch.md), [charging](https://github.com/MothershipOS/motorola_nio/blob/main/docs/charging.md), [system](https://github.com/MothershipOS/motorola_nio/blob/main/docs/system.md)
+
+## Code
+- `crates/`: Rust workspace: mothershipd (host daemon), mship-devices (modem, camera, Wi-Fi, Bluetooth, battery, USB services), mship-launch (VM launcher), mship-presenter (VM display), mship-shell (touch UI), mship-init, mship-dev (PC tools)
+- `host/`: GPU stack with crosvm and virtio-media patches, sway DRM lease patch, VM sound
+- `dist/`: files installed on the host
+
+## Optional
+- [Archive](https://github.com/MothershipOS/motorola_nio/blob/main/archive/README.md): history (Qualcomm hypervisor analysis, EL2 debugging) and one-off prototypes

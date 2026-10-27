@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "name": "battery status (shared, read-only)",
+  "platform": {
+    "id": "cuttlefish-arm64",
+    "version": "1.0"
+  },
+  "slots": {
+    "battery": {
+      "contract": "mship.battery",
+      "version": "1.0",
+      "required": false
+    }
+  },
+  "handover": {
+    "when_shown": [],
+    "while_running": []
+  }
+}

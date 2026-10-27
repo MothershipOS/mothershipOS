@@ -1,0 +1,83 @@
+{
+  "pixelos.json": {
+    "runnable": true,
+    "empty_slots": [],
+    "lent": [
+      "display",
+      "buttons",
+      "internet"
+    ],
+    "platform": "cuttlefish-arm64"
+  },
+  "ubuntu-touch.json": {
+    "runnable": true,
+    "empty_slots": [],
+    "lent": [
+      "display"
+    ],
+    "platform": "efi-virt-arm64"
+  },
+  "minimal.json": {
+    "runnable": true,
+    "empty_slots": [],
+    "lent": [],
+    "platform": "efi-virt-arm64"
+  },
+  "forward-compatible.json": {
+    "runnable": true,
+    "empty_slots": [
+      "camera"
+    ],
+    "lent": [
+      "display"
+    ],
+    "platform": "cuttlefish-arm64"
+  },
+  "wifi-bands.json": {
+    "runnable": true,
+    "empty_slots": [],
+    "lent": [
+      "wifi-2g",
+      "wifi-5g"
+    ],
+    "platform": "cuttlefish-arm64"
+  },
+  "bluetooth.json": {
+    "runnable": true,
+    "empty_slots": [],
+    "lent": [
+      "bluetooth"
+    ],
+    "platform": "cuttlefish-arm64"
+  },
+  "battery.json": {
+    "runnable": true,
+    "empty_slots": [],
+    "lent": [],
+    "platform": "cuttlefish-arm64"
+  },
+  "usb.json": {
+    "runnable": true,
+    "empty_slots": [],
+    "lent": [
+      "usb"
+    ],
+    "platform": "cuttlefish-arm64"
+  },
+  "modem.json": {
+    "runnable": true,
+    "empty_slots": [],
+    "lent": [
+      "cellular"
+    ],
+    "platform": "cuttlefish-arm64"
+  },
+  "camera.json": {
+    "runnable": true,
+    "empty_slots": [],
+    "lent": [
+      "cameras"
+    ],
+    "platform": "cuttlefish-arm64"
+  }
+}

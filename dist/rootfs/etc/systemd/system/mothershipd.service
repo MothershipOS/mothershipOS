@@ -1,0 +1,13 @@
+[Unit]
+Description=mothershipOS host daemon (mothershipd: VMs, hardware handover, power, host status and settings; API for the shell)
+After=multi-user.target
+
+[Service]
+ExecStart=/usr/local/sbin/mothershipd
+Restart=always
+RestartSec=3
+# the VM pool: each VM's launcher and crosvm in a cgroup of its own (cpu.weight, memory.oom.group)
+Delegate=cpu memory
+
+[Install]
+WantedBy=multi-user.target

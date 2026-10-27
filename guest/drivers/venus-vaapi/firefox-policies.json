@@ -1,0 +1,7 @@
+{ "policies": { "Preferences": {
+  "media.hardware-video-decoding.force-enabled": { "Value": true, "Status": "default" },
+  "media.ffmpeg.vaapi.enabled": { "Value": true, "Status": "default" },
+  "media.av1.enabled": { "Value": false, "Status": "default" },
+  "widget.dmabuf.force-enabled": { "Value": true, "Status": "default" },
+  "gfx.webrender.compositor": { "Value": false, "Status": "default" }
+} } }

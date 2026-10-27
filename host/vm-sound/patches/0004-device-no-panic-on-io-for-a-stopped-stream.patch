@@ -1,0 +1,59 @@
+mothershipOS: the guest may queue PCM data for a stream the backend has just stopped (or not started yet), e.g.
+GNOME's speaker test starting and stopping short streams. The backend's write()/read() then fails with
+InvalidState and the unwrap() killed the vring worker thread: the process stayed up, but no queue was served any
+more and the guest had no sound until the VM restarted. Log it instead; the requests stay queued and are played
+when the stream starts. The same for prepare/start/stop in a state that doesn't allow them: answer the guest with
+VIRTIO_SND_S_BAD_MSG (as release already does) instead of panicking the control worker.
+
+--- a/src/device.rs
++++ b/src/device.rs
+@@ -299,5 +299,8 @@
+                         resp.code = VIRTIO_SND_S_BAD_MSG.into();
+                     } else {
+-                        audio_backend.write().unwrap().prepare(stream_id).unwrap();
++                        if let Err(err) = audio_backend.write().unwrap().prepare(stream_id) {
++                            log::warn!("stream {stream_id}: {err}");
++                            resp.code = VIRTIO_SND_S_BAD_MSG.into();
++                        }
+                     }
+                 }
+@@ -333,5 +336,8 @@
+                         resp.code = VIRTIO_SND_S_BAD_MSG.into();
+                     } else {
+-                        audio_backend.write().unwrap().start(stream_id).unwrap();
++                        if let Err(err) = audio_backend.write().unwrap().start(stream_id) {
++                            log::warn!("stream {stream_id}: {err}");
++                            resp.code = VIRTIO_SND_S_BAD_MSG.into();
++                        }
+                     }
+                 }
+@@ -346,5 +352,8 @@
+                         resp.code = VIRTIO_SND_S_BAD_MSG.into();
+                     } else {
+-                        audio_backend.write().unwrap().stop(stream_id).unwrap();
++                        if let Err(err) = audio_backend.write().unwrap().stop(stream_id) {
++                            log::warn!("stream {stream_id}: {err}");
++                            resp.code = VIRTIO_SND_S_BAD_MSG.into();
++                        }
+                     }
+                 }
+@@ -467,13 +476,17 @@
+             let b = audio_backend.read().unwrap();
+             match direction {
+                 Direction::Output => {
+                     for id in stream_ids {
+-                        b.write(id).unwrap();
++                        if let Err(err) = b.write(id) {
++                            log::debug!("stream {id}: data queued while not playing: {err}");
++                        }
+                     }
+                 }
+                 Direction::Input => {
+                     for id in stream_ids {
+-                        b.read(id).unwrap();
++                        if let Err(err) = b.read(id) {
++                            log::debug!("stream {id}: capture queued while not running: {err}");
++                        }
+                     }
+                 }
+             }

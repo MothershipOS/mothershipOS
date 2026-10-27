@@ -1,0 +1,18 @@
+[package]
+name = "mship-host"
+description = "mothershipOS host operations (root): Wi-Fi, SSH, CPU, battery, Bluetooth, region, display, VMs, resources"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mship-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+libc.workspace = true
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+tempfile = "3"

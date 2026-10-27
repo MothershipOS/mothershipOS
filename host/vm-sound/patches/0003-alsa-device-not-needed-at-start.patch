@@ -1,0 +1,42 @@
+mothershipOS: the backend must not need the ALSA device to start, nor die when it can't be opened. Our device is
+the external display's audio, which only works while the monitor is connected and lit; the backend starts with
+the VM, before that, and crosvm stops the VM when the backend exits. Placeholders open "null", and a failed
+configuration of the device (at start, or when the guest sets a stream's parameters) is only logged: reporting
+it to the guest makes it write the device off for good (PipeWire falls back to a dummy output). The guest sets
+the parameters again on its next playback, when the device may be up.
+
+--- a/src/audio_backends/alsa.rs
++++ b/src/audio_backends/alsa.rs
+@@ -490,5 +490,5 @@
+             // `update_pcm`.
+             let pcm = Arc::new(Mutex::new(
+-                PCM::new("default", Direction::Output.into(), false).unwrap(),
++                PCM::new("null", Direction::Output.into(), false).unwrap(),
+             ));
+ 
+@@ -509,5 +509,7 @@
+ 
+         for (i, pcm) in vec.iter_mut().enumerate() {
+-            update_pcm(pcm, i, &streams).unwrap();
++            if let Err(err) = update_pcm(pcm, i, &streams) {
++                log::warn!("stream {i}: device not available yet: {err}");
++            }
+         }
+ 
+@@ -664,10 +666,13 @@
+             }
+         }
+-        update_pcm(
++        if let Err(err) = update_pcm(
+             &self.pcms[stream_id as usize],
+             stream_id as usize,
+             &self.streams,
+-        )
+-        .unwrap();
++        ) {
++            // not an error for the guest: it would write the device off for good (PipeWire falls back to a
++            // dummy output); it sets the parameters again on its next playback, when the device may be up
++            log::warn!("stream {stream_id}: device not available, configured on the next attempt: {err}");
++        }
+         Ok(())
+     }

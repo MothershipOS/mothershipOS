@@ -1,0 +1,11 @@
+[Unit]
+Description=mothershipOS dev link telnet shell (usb0, as in the RAM host: mship-dev's shell)
+After=systemd-networkd.service
+
+[Service]
+ExecStart=/usr/local/sbin/busybox telnetd -F -l /bin/sh -b 10.42.0.2:2323
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

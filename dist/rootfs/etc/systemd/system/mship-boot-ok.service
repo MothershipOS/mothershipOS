@@ -1,0 +1,10 @@
+[Unit]
+Description=mothershipOS boot came up (the initramfs's boot counter starts again)
+After=multi-user.target ssh.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mship-system boot-ok
+
+[Install]
+WantedBy=multi-user.target

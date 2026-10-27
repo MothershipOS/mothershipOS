@@ -1,0 +1,158 @@
+Patch virtio-media 0.0.8 (crates.io copy): per-session MMAP offsets in the V4L2 proxy.
+
+The proxy keyed MMAP buffers by the host V4L2 mem offset and registered that same offset in its MMAP range. Host
+offsets are per open file (every session's OUTPUT queue starts at 0, CAPTURE at the same base), so a second
+concurrent session on the device (Firefox opens several decoders) registered an occupied offset and the
+`.unwrap()` panicked the media worker, which stops the whole VM. Here the proxy hands the guest offsets of its
+own (unique across sessions), translates them in every buffer it returns, and an MMAP request only resolves
+buffers of the requesting session.
+
+diff -ruN a/src/devices/v4l2_device_proxy.rs b/src/devices/v4l2_device_proxy.rs
+--- a/src/devices/v4l2_device_proxy.rs	2026-10-26 08:31:32.230016302 +0000
++++ b/src/devices/v4l2_device_proxy.rs	2026-10-26 08:31:32.259017082 +0000
+@@ -161,6 +161,26 @@
+     Ok(guest_buffer)
+ }
+ 
++/// mothershipOS: replace the host MMAP offsets of `buffer` (from session `session_id`) with the guest
++/// offsets the proxy registered for them.
++fn host_mmap_offsets_to_guest(
++    mmap_buffers: &BTreeMap<u32, V4l2MmapPlaneInfo>,
++    session_id: u32,
++    buffer: &mut V4l2Buffer,
++) {
++    let queue = buffer.queue();
++    let index = buffer.index() as u8;
++    if let V4l2PlanesWithBackingMut::Mmap(planes) = buffer.planes_with_backing_iter_mut() {
++        for (j, mut plane) in planes.enumerate() {
++            if let Some((&guest_offset, _)) = mmap_buffers.iter().find(|(_, b)| {
++                b.session_id == session_id && b.queue == queue && b.index == index && b.plane == j as u8
++            }) {
++                plane.set_mem_offset(guest_offset);
++            }
++        }
++    }
++}
++
+ #[derive(Clone, Copy, Debug)]
+ enum ExtCtrlIoctl {
+     Get,
+@@ -365,6 +385,9 @@
+     mmap_buffers: BTreeMap<u32, V4l2MmapPlaneInfo>,
+ 
+     mmap_manager: MmapMappingManager<HM>,
++
++    /// mothershipOS: next guest MMAP offset to try.
++    next_guest_offset: u32,
+ }
+ 
+ #[derive(Debug)]
+@@ -385,6 +408,7 @@
+             device_path,
+             mmap_buffers: Default::default(),
+             mmap_manager: MmapMappingManager::from(mapper),
++            next_guest_offset: 0,
+         }
+     }
+ 
+@@ -432,11 +456,23 @@
+ 
+             if let V4l2PlanesWithBacking::Mmap(planes) = buffer.planes_with_backing_iter() {
+                 for (j, plane) in planes.enumerate() {
+-                    let offset = plane.mem_offset();
+-
+-                    self.mmap_manager
+-                        .register_buffer(Some(offset), *plane.length)
+-                        .unwrap();
++                    let length = *plane.length;
++                    // mothershipOS: allocate a guest offset unique across sessions.
++                    let span = length.max(1).next_multiple_of(0x1000);
++                    let mut offset = None;
++                    for _ in 0..4096 {
++                        let candidate = self.next_guest_offset;
++                        self.next_guest_offset =
++                            candidate.checked_add(span).filter(|o| *o <= 0xc000_0000).unwrap_or(0);
++                        if self.mmap_manager.register_buffer(Some(candidate), length).is_ok() {
++                            offset = Some(candidate);
++                            break;
++                        }
++                    }
++                    let Some(offset) = offset else {
++                        error!("no free MMAP offset for buffer {} plane {}", buffer.index(), j);
++                        continue;
++                    };
+ 
+                     self.mmap_buffers.insert(
+                         offset,
+@@ -510,6 +546,8 @@
+                         Some(v.queue) != session.output_queue_type
+                             || v.index != buffer.index() as u8
+                     });
++                    let mut buffer = buffer;
++                    host_mmap_offsets_to_guest(&self.mmap_buffers, session.id, &mut buffer);
+                     self.evt_queue
+                         .send_event(V4l2Event::DequeueBuffer(DequeueBufferEvent::new(
+                             session.id, buffer,
+@@ -538,7 +576,7 @@
+             None => return Ok(()),
+         };
+ 
+-        let v4l2_buffer =
++        let mut v4l2_buffer =
+             match v4l2r::ioctl::dqbuf::<V4l2Buffer>(&session.device, capture_queue_type) {
+                 Ok(buffer) => buffer,
+                 Err(DqBufError::IoctlError(DqBufIoctlError::Eos)) => return Ok(()),
+@@ -566,6 +604,7 @@
+             }
+         }
+ 
++        host_mmap_offsets_to_guest(&self.mmap_buffers, session.id, &mut v4l2_buffer);
+         self.evt_queue
+             .send_event(V4l2Event::DequeueBuffer(DequeueBufferEvent::new(
+                 session.id,
+@@ -667,6 +706,10 @@
+                     libc::EINVAL
+                 })
+             })
++            .map(|mut buffer| {
++                host_mmap_offsets_to_guest(&self.mmap_buffers, session.id, &mut buffer);
++                buffer
++            })
+     }
+ 
+     fn streamon(&mut self, session: &mut Self::Session, queue: QueueType) -> IoctlResult<()> {
+@@ -743,6 +786,10 @@
+                     error!("{:#}", e.context("while processing QBUF"));
+                     libc::EINVAL
+                 })
++            })
++            .map(|mut buffer| {
++                host_mmap_offsets_to_guest(&self.mmap_buffers, session.id, &mut buffer);
++                buffer
+             })?;
+ 
+         match queue {
+@@ -1132,6 +1179,10 @@
+                     libc::EINVAL
+                 })
+             })
++            .map(|mut buffer| {
++                host_mmap_offsets_to_guest(&self.mmap_buffers, session.id, &mut buffer);
++                buffer
++            })
+     }
+ 
+     fn g_selection(
+@@ -1239,7 +1290,11 @@
+     ) -> Result<(u64, u64), i32> {
+         let rw = (flags & VIRTIO_MEDIA_MMAP_FLAG_RW) != 0;
+ 
+-        let plane_info = self.mmap_buffers.get_mut(&offset).ok_or(libc::EINVAL)?;
++        let plane_info = self
++            .mmap_buffers
++            .get_mut(&offset)
++            .filter(|b| b.session_id == session.id)
++            .ok_or(libc::EINVAL)?;
+ 
+         // Export the FD for the plane and cache it if needed.
+         //

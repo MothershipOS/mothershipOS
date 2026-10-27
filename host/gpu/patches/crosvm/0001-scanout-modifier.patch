@@ -1,0 +1,24 @@
+Patch crosvm: scanout modifier.
+
+The guest scans out with SET_SCANOUT_BLOB, which carries format/strides/offsets but no modifier, and crosvm
+imported such buffers into the display as modifier 0 (linear). Buffers from the minigbm gralloc are usually UBWC
+(DRM_FORMAT_MOD_QCOM_COMPRESSED), so the panel showed tile garbage. Take the modifier rutabaga recorded at
+allocation (resource3d_info) when there is one.
+
+diff --git a/devices/src/virtio/gpu/virtio_gpu.rs b/devices/src/virtio/gpu/virtio_gpu.rs
+index 7592c9b10..0d6a72daf 100644
+--- a/devices/src/virtio/gpu/virtio_gpu.rs
++++ b/devices/src/virtio/gpu/virtio_gpu.rs
+@@ -482,7 +482,11 @@ impl VirtioGpuScanout {
+                 data.drm_format,
+                 data.strides[0],
+                 data.offsets[0],
+-                0,
++                // mothershipOS: SET_SCANOUT_BLOB has no modifier; use the one from allocation (UBWC)
++                rutabaga
++                    .resource3d_info(resource.resource_id)
++                    .map(|q| q.modifier)
++                    .unwrap_or(0),
+             ),
+             None => {
+                 let query = rutabaga.resource3d_info(resource.resource_id).ok()?;

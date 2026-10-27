@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "name": "two-band native Wi-Fi",
+  "platform": {
+    "id": "cuttlefish-arm64",
+    "version": "1.0"
+  },
+  "slots": {
+    "wifi": {
+      "contract": "mship.wifi",
+      "version": "1.0"
+    },
+    "internet": {
+      "contract": "mship.net-shared",
+      "version": "1.0",
+      "required": false
+    }
+  },
+  "handover": {
+    "when_shown": [],
+    "while_running": [
+      "wifi-2g",
+      "wifi-5g"
+    ]
+  }
+}

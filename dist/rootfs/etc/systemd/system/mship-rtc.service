@@ -1,0 +1,17 @@
+[Unit]
+Description=Restore the clock from the PMIC RTC + saved offset (mothershipOS)
+DefaultDependencies=no
+RequiresMountsFor=/var/lib/mothership
+After=local-fs.target
+Before=sysinit.target time-set.target shutdown.target
+Wants=time-set.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/mship-system rtc restore
+ExecStop=/usr/local/sbin/mship-system rtc save
+
+[Install]
+WantedBy=sysinit.target

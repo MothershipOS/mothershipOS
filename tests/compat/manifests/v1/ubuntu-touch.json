@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "name": "Ubuntu Touch 20.04",
+  "min_mothership": "2026.1",
+  "platform": {
+    "id": "efi-virt-arm64",
+    "version": "1.0"
+  },
+  "boot": {
+    "disk": "hdd.raw",
+    "efi_vars": "efi_vars.fd"
+  },
+  "resources": {
+    "cpus": 4,
+    "memory_mb": 4096
+  },
+  "slots": {
+    "display": {
+      "contract": "mship.display",
+      "version": "1.0"
+    },
+    "touch": {
+      "contract": "mship.touch",
+      "version": "1.0"
+    },
+    "gpu": {
+      "contract": "mship.gpu",
+      "version": "1.0",
+      "params": {
+        "context_types": [
+          "virgl"
+        ]
+      }
+    },
+    "internet": {
+      "contract": "mship.net-shared",
+      "version": "1.0",
+      "required": false
+    }
+  },
+  "handover": {
+    "when_shown": [
+      "display"
+    ],
+    "while_running": []
+  }
+}

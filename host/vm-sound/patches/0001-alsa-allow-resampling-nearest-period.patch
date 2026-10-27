@@ -1,0 +1,23 @@
+mothershipOS: let ALSA adapt the guest's stream to the device (a dmix on the DisplayPort output, fixed 48 kHz and
+fixed period). Upstream turns resampling off and asks for exactly a 100 ms period, so any device that can't do the
+guest's rate or that period natively fails hw_params and the backend panics at start.
+
+--- a/src/audio_backends/alsa.rs
++++ b/src/audio_backends/alsa.rs
+@@ -84,7 +84,6 @@
+             let hwp = HwParams::any(&pcm)?;
+             hwp.set_channels(s.params.channels.into())?;
+             hwp.set_rate(rate, ValueOr::Nearest)?;
+-            hwp.set_rate_resample(false)?;
+             hwp.set_format(match s.params.format {
+                 virtio_sound::VIRTIO_SND_PCM_FMT_IMA_ADPCM => Format::ImaAdPCM,
+                 virtio_sound::VIRTIO_SND_PCM_FMT_MU_LAW => Format::MuLaw,
+@@ -163,7 +162,7 @@
+ 
+             let period_frames = period_bytes / frame_size;
+ 
+-            hwp.set_period_size(i64::from(period_frames), alsa::ValueOr::Less)?;
++            hwp.set_period_size_near(i64::from(period_frames), alsa::ValueOr::Nearest)?;
+ 
+             // Online ALSA driver recommendations seem to be that the buffer should be at
+             // least 2 * period_size.

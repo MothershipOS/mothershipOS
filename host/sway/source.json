@@ -1,0 +1,4 @@
+{
+  "wlroots": { "version": "0.19.2", "url": "https://gitlab.freedesktop.org/wlroots/wlroots/-/archive/0.19.2/wlroots-0.19.2.tar.gz", "sha256": "f0530ecaa8739d15f97bd1e1edddb77e281d57e42d4263fccb67157f71730d17" },
+  "sway": { "version": "1.11", "url": "https://github.com/swaywm/sway/releases/download/1.11/sway-1.11.tar.gz", "sha256": "0e37a55b7c3379230e97e1ad982542b75016a0c7d6676198604e557f9b373dae" }
+}

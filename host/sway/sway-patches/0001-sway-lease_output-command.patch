@@ -1,0 +1,113 @@
+diff -ruN a/include/sway/commands.h b/include/sway/commands.h
+--- a/include/sway/commands.h	2025-06-08 23:09:07.000000000 +0200
++++ b/include/sway/commands.h	2026-10-12 20:51:32.296072533 +0200
+@@ -151,6 +151,7 @@
+ sway_cmd cmd_ipc;
+ sway_cmd cmd_kill;
+ sway_cmd cmd_layout;
++sway_cmd cmd_lease_output;
+ sway_cmd cmd_log_colors;
+ sway_cmd cmd_mark;
+ sway_cmd cmd_max_render_time;
+diff -ruN a/sway/commands/lease_output.c b/sway/commands/lease_output.c
+--- a/sway/commands/lease_output.c	1970-01-01 01:00:00.000000000 +0100
++++ b/sway/commands/lease_output.c	2026-10-18 15:30:00.000000000 +0200
+@@ -0,0 +1,55 @@
++// mothershipOS: lend a desktop output to a DRM-lease client (wp_drm_lease_device_v1) at runtime.
++//   lease_output <name> on    offer the output; sway's lease handler grants the client's request, the output
++//                             then disappears from sway until the lease ends
++//   lease_output <name> off   revoke that output's lease / withdraw the offer; wlroots re-announces the connector
++//                             and sway configures it again like a newly plugged output
++// Several outputs can be leased at once (the panel to one VM, an external display to another): the grant handler
++// (server.c) records the leased output's name in wlr_drm_lease_v1.data, so "off" ends only that output's lease.
++#include <string.h>
++#include <wlr/config.h>
++#include "sway/commands.h"
++#include "sway/output.h"
++#include "sway/server.h"
++#include "util.h"
++#if WLR_HAS_DRM_BACKEND
++#include <wlr/types/wlr_drm_lease_v1.h>
++#endif
++
++struct cmd_results *cmd_lease_output(int argc, char **argv) {
++	struct cmd_results *error;
++	if ((error = checkarg(argc, "lease_output", EXPECTED_EQUAL_TO, 2))) {
++		return error;
++	}
++#if WLR_HAS_DRM_BACKEND
++	struct wlr_drm_lease_v1_manager *mgr = server.drm_lease_manager;
++	if (!mgr) {
++		return cmd_results_new(CMD_FAILURE, "DRM leasing is not available");
++	}
++	bool on = parse_boolean(argv[1], false);
++	struct sway_output *output = all_output_by_name_or_id(argv[0]);
++	if (on) {
++		if (!output || !output->wlr_output) {
++			return cmd_results_new(CMD_FAILURE, "Unknown output '%s'", argv[0]);
++		}
++		if (!wlr_drm_lease_v1_manager_offer_output(mgr, output->wlr_output)) {
++			return cmd_results_new(CMD_FAILURE, "Output '%s' can't be leased", argv[0]);
++		}
++		return cmd_results_new(CMD_SUCCESS, NULL);
++	}
++	if (output && output->wlr_output) {	// offered but not taken yet
++		wlr_drm_lease_v1_manager_withdraw_output(mgr, output->wlr_output);
++	}
++	struct wlr_drm_lease_device_v1 *dev;
++	wl_list_for_each(dev, &mgr->devices, link) {
++		struct wlr_drm_lease_v1 *lease, *tmp;
++		wl_list_for_each_safe(lease, tmp, &dev->leases, link) {
++			if (lease->data && strcmp(lease->data, argv[0]) == 0) {
++				wlr_drm_lease_v1_revoke(lease);
++			}
++		}
++	}
++	return cmd_results_new(CMD_SUCCESS, NULL);
++#else
++	return cmd_results_new(CMD_FAILURE, "sway was built without the DRM backend");
++#endif
++}
+diff -ruN a/sway/commands.c b/sway/commands.c
+--- a/sway/commands.c	2025-06-08 23:09:07.000000000 +0200
++++ b/sway/commands.c	2026-10-12 20:51:32.295861053 +0200
+@@ -121,6 +121,7 @@
+ 	{ "inhibit_idle", cmd_inhibit_idle },
+ 	{ "kill", cmd_kill },
+ 	{ "layout", cmd_layout },
++	{ "lease_output", cmd_lease_output },
+ 	{ "mark", cmd_mark },
+ 	{ "max_render_time", cmd_max_render_time },
+ 	{ "move", cmd_move },
+diff -ruN a/sway/meson.build b/sway/meson.build
+--- a/sway/meson.build	2025-06-08 23:09:07.000000000 +0200
++++ b/sway/meson.build	2026-10-12 20:51:32.296249860 +0200
+@@ -78,6 +78,7 @@
+ 	'commands/include.c',
+ 	'commands/input.c',
+ 	'commands/layout.c',
++	'commands/lease_output.c',
+ 	'commands/mode.c',
+ 	'commands/mouse_warping.c',
+ 	'commands/move.c',
+diff -ruN a/sway/server.c b/sway/server.c
+--- a/sway/server.c	2025-06-08 23:09:07.000000000 +0200
++++ b/sway/server.c	2026-10-18 15:30:00.000000000 +0200
+@@ -82,11 +82,17 @@
+ 	 * more logic here. */
+ 
+ 	struct wlr_drm_lease_request_v1 *req = data;
++	// mothershipOS: remember the leased output by name (lease_output <name> off revokes only that lease)
++	char *name = req->n_connectors > 0 && req->connectors[0]->output ?
++		strdup(req->connectors[0]->output->name) : NULL;
+ 	struct wlr_drm_lease_v1 *lease = wlr_drm_lease_request_v1_grant(req);
+ 	if (!lease) {
+ 		sway_log(SWAY_ERROR, "Failed to grant lease request");
+ 		wlr_drm_lease_request_v1_reject(req);
++		free(name);
++		return;
+ 	}
++	lease->data = name;	// a few bytes per lease, kept for the session
+ }
+ #endif
+ 

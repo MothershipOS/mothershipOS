@@ -1,0 +1,12 @@
+[Unit]
+Description=mothershipOS Bluetooth bridge (mship.bt: the HCI controller for VMs)
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+ExecStart=/usr/local/sbin/mship-bt-bridge
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

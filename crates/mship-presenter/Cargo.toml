@@ -1,0 +1,15 @@
+[package]
+name = "mship-presenter"
+description = "mothershipOS VM display presenter: shows a VM on a display through a DRM lease"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mship-core.workspace = true
+libc.workspace = true
+drm = "0.14"
+calloop = { version = "0.14", features = ["signals"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+smithay = { version = "0.7", default-features = false, features = ["wayland_frontend", "backend_egl", "backend_gbm", "renderer_gl"] }

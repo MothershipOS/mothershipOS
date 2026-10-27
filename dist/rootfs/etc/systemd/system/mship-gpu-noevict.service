@@ -1,0 +1,14 @@
+[Unit]
+Description=mothershipOS: keep GPU buffers out of swap (msm eviction off)
+# With swap present, the msm driver may evict GEM buffers to it. VMs map their GPU buffers into the guest
+# (native context, zero-copy scanout); KVM faulting on an evicted buffer kills the VM. The swap file is for VM RAM.
+Before=var-lib-mothership-swapfile.swap mship-sway.service
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mship-system gpu-noevict
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

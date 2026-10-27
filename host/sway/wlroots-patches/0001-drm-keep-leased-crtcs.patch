@@ -1,0 +1,28 @@
+--- a/backend/drm/drm.c
++++ b/backend/drm/drm.c
+@@ -1380,6 +1380,16 @@
+ 		previous_match[i] = UNMATCHED;
+ 	}
+ 
++	// mothershipOS: a leased CRTC belongs to its lessee until the lease ends. Leased connectors are disconnected
++	// here and no longer claim it, so without this mask another output could be given the lessee's CRTC (and its
++	// primary plane): the kernel then refuses that output's lease or modeset with EBUSY.
++	uint32_t leased_crtcs = 0;
++	for (size_t k = 0; k < drm->num_crtcs; ++k) {
++		if (drm->crtcs[k].lease != NULL) {
++			leased_crtcs |= 1u << k;
++		}
++	}
++
+ 	size_t i = 0;
+ 	struct wlr_drm_connector *conn;
+ 	wl_list_for_each(conn, &drm->connectors, link) {
+@@ -1394,7 +1404,7 @@
+ 		bool want_crtc = conn == want_conn || conn->output.enabled;
+ 
+ 		if (conn->status == DRM_MODE_CONNECTED && want_crtc) {
+-			connector_constraints[i] = conn->possible_crtcs;
++			connector_constraints[i] = conn->possible_crtcs & ~leased_crtcs;
+ 		} else {
+ 			// Will always fail to match anything
+ 			connector_constraints[i] = 0;

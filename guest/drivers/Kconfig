@@ -1,0 +1,19 @@
+# mothershipOS drivers for Linux guests, built into the guest kernel (drivers/mothership, by cargo xtask guest-kernel)
+menu "mothershipOS guest drivers"
+
+config MSHIP_VIRTIO_MEDIA
+	tristate "virtio-media: the host's V4L2 devices (the phone's Venus video decoder)"
+	depends on VIRTIO && VIDEO_DEV
+	select VIDEOBUF2_MEMOPS
+	select VIDEOBUF2_CORE
+	help
+	  The virtio-media device of crosvm: V4L2 devices of the host (the Qualcomm Venus stateful decoder) as
+	  /dev/videoN in the guest.
+
+config MSHIP_WIFI
+	tristate "mship.wifi: the phone's Wi-Fi bands as native interfaces"
+	depends on CFG80211 && VSOCKETS
+	help
+	  A cfg80211 device per Wi-Fi band lent to this VM by the host (mship.wifi 1.x over vsock).
+
+endmenu

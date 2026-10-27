@@ -1,0 +1,37 @@
+[package]
+name = "mship-devices"
+description = "mothershipOS device services: the phone's battery, Bluetooth, cameras, modem, USB devices and Wi-Fi bands for VMs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mship-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+vsock = "0.5"
+
+[[bin]]
+name = "mship-battery"
+path = "src/bin/battery.rs"
+
+[[bin]]
+name = "mship-bt-bridge"
+path = "src/bin/bt.rs"
+
+[[bin]]
+name = "mship-camera"
+path = "src/bin/camera.rs"
+
+[[bin]]
+name = "mship-modem"
+path = "src/bin/modem/main.rs"
+
+[[bin]]
+name = "mship-usb"
+path = "src/bin/usb.rs"
+
+[[bin]]
+name = "mship-wifi-bridge"
+path = "src/bin/wifi.rs"

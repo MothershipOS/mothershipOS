@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "name": "made for a newer release",
+  "platform": {"id": "cuttlefish-arm64", "version": "1.0", "future_platform_field": true},
+  "slots": {
+    "display": {"contract": "mship.display", "version": "1.0"},
+    "camera": {"contract": "mship.hologram", "version": "1.0", "required": false}
+  },
+  "handover": {"when_shown": ["display", "camera"], "while_running": []},
+  "future_top_level_field": {"anything": 1}
+}

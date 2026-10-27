@@ -1,0 +1,538 @@
+diff --git a/meson.build b/meson.build
+index 769c350..c7ec061 100644
+--- a/meson.build
++++ b/meson.build
+@@ -15,6 +15,7 @@ project(
+ libva_dep = dependency('libva', version: '>=1.20')
+ libdrm_dep = dependency('libdrm')
+ threads_dep = dependency('threads')
++gbm_dep = dependency('gbm')
+ 
+ add_project_arguments(
+   '-D_GNU_SOURCE',
+@@ -56,7 +57,7 @@ venus_driver = shared_module(
+   'venus_drv_video',
+   driver_sources,
+   include_directories: project_inc,
+-  dependencies: [libva_dep, libdrm_dep, threads_dep],
++  dependencies: [libva_dep, libdrm_dep, threads_dep, gbm_dep],
+   name_prefix: '',
+   gnu_symbol_visibility: 'hidden',
+   install: true,
+diff --git a/src/decode.c b/src/decode.c
+index 2cdb6fe..24f9472 100644
+--- a/src/decode.c
++++ b/src/decode.c
+@@ -8,6 +8,7 @@
+ #include <limits.h>
+ #include <linux/videodev2.h>
+ #include <stdint.h>
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <time.h>
+diff --git a/src/objects.c b/src/objects.c
+index 79a9774..9fd8182 100644
+--- a/src/objects.c
++++ b/src/objects.c
+@@ -7,6 +7,7 @@
+ #include <linux/dma-buf.h>
+ #include <poll.h>
+ #include <stdlib.h>
++#include <stdio.h>
+ #include <string.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
+@@ -16,6 +17,8 @@
+ #include <xf86drm.h>
+ #include <drm.h>
+ #include <drm/msm_drm.h>
++#include <gbm.h>
++#include <pthread.h>
+ 
+ /*
+  * VA surfaces are CPU-visible NV12 allocations backed by MSM GEM.  The
+@@ -130,6 +133,77 @@ static void release_surface(struct venus_surface *surface)
+     memset(surface, 0, sizeof(*surface));
+ }
+ 
++static struct gbm_device *venus_gbm_device(void)
++{
++    static struct gbm_device *device;
++    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
++
++    pthread_mutex_lock(&lock);
++    if (!device) {
++        int fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
++
++        if (fd >= 0) {
++            device = gbm_create_device(fd);
++            if (!device)
++                close(fd);
++        }
++    }
++    pthread_mutex_unlock(&lock);
++    return device;
++}
++
++/*
++ * Allocate NV12 surface storage as a GBM buffer. On the phone the render node
++ * is virtio-gpu (host freedreno via native context), so the bare-metal
++ * MSM_GEM_NEW ioctl returns EINVAL; GBM works on virtio-gpu and real MSM alike.
++ * The buffer is linear and CPU-mappable (decode copy still works) and a proper
++ * GPU resource (clients import it for zero-copy display). GBM may widen the
++ * stride, so the caller adopts the returned stride/layout.
++ */
++static int allocate_gbm_dmabuf(size_t want_stride, size_t scanlines,
++                               size_t chroma_scanlines, size_t *out_stride,
++                               size_t *out_uv_offset, size_t *out_size,
++                               int *dma_fd)
++{
++    struct gbm_device *device = venus_gbm_device();
++    struct gbm_bo *bo;
++    size_t rows;
++    size_t stride;
++    int fd;
++
++    if (!device)
++        return -ENODEV;
++    if (want_stride == 0 || want_stride > UINT32_MAX)
++        return -EOVERFLOW;
++    rows = scanlines + chroma_scanlines + 16u;
++    if (rows == 0 || rows > UINT32_MAX)
++        return -EOVERFLOW;
++
++    bo = gbm_bo_create(device, (uint32_t)want_stride, (uint32_t)rows,
++                       GBM_FORMAT_R8,
++                       GBM_BO_USE_LINEAR | GBM_BO_USE_RENDERING);
++    if (!bo)
++        return -ENOMEM;
++
++    stride = gbm_bo_get_stride(bo);
++    fd = gbm_bo_get_fd(bo);
++    gbm_bo_destroy(bo);
++    if (fd < 0)
++        return -EIO;
++    if (stride < want_stride)
++        stride = want_stride;
++    if (rows != 0 && stride > SIZE_MAX / rows) {
++        close(fd);
++        return -EOVERFLOW;
++    }
++
++    *out_stride = stride;
++    *out_uv_offset = stride * scanlines;
++    *out_size = stride * rows;
++    *dma_fd = fd;
++    return 0;
++}
++
+ static int allocate_dma_surface(struct venus_surface *surface,
+                                 unsigned int width,
+                                 unsigned int height,
+@@ -175,9 +249,23 @@ static int allocate_dma_surface(struct venus_surface *surface,
+         allocation_size > UINT32_MAX)
+         return -EOVERFLOW;
+ 
+-    status = allocate_msm_dmabuf(allocation_size, &dma_fd);
+-    if (status < 0)
+-        return status;
++    {
++        size_t gbm_stride = stride;
++        size_t gbm_uv = uv_offset;
++        size_t gbm_size = allocation_size;
++
++        status = allocate_gbm_dmabuf(stride, scanlines, chroma_scanlines,
++                                     &gbm_stride, &gbm_uv, &gbm_size, &dma_fd);
++        if (status == 0) {
++            stride = gbm_stride;
++            uv_offset = gbm_uv;
++            allocation_size = gbm_size;
++        } else {
++            status = allocate_msm_dmabuf(allocation_size, &dma_fd);
++            if (status < 0)
++                return status;
++        }
++    }
+ 
+     surface->data =
+         mmap(NULL, allocation_size, PROT_READ | PROT_WRITE,
+@@ -189,22 +277,10 @@ static int allocate_dma_surface(struct venus_surface *surface,
+         return -saved_errno;
+     }
+ 
+-    if (xioctl(dma_fd, DMA_BUF_IOCTL_SYNC, &sync) < 0) {
+-        saved_errno = errno;
+-        munmap(surface->data, allocation_size);
+-        surface->data = NULL;
+-        close(dma_fd);
+-        return -saved_errno;
+-    }
++    (void)xioctl(dma_fd, DMA_BUF_IOCTL_SYNC, &sync);
+     memset(surface->data, 0, allocation_size);
+     sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
+-    if (xioctl(dma_fd, DMA_BUF_IOCTL_SYNC, &sync) < 0) {
+-        saved_errno = errno;
+-        munmap(surface->data, allocation_size);
+-        surface->data = NULL;
+-        close(dma_fd);
+-        return -saved_errno;
+-    }
++    (void)xioctl(dma_fd, DMA_BUF_IOCTL_SYNC, &sync);
+ 
+     surface->dma_fd = dma_fd;
+     surface->dma_backed = true;
+@@ -330,6 +406,86 @@ int venus_surface_end_cpu_rw(struct venus_surface *surface)
+         surface, DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW);
+ }
+ 
++/*
++ * Decoded frames arrive in the V4L2 CAPTURE mapping, which virtio-media maps
++ * write-combined (uncached): reads from it are latency-bound per core, so a
++ * 4K NV12 frame takes ~13 ms on one thread. Split the rows over a few threads;
++ * uncached read bandwidth scales with the number of readers. The client syncs
++ * each surface right after submitting it, so this copy is on its critical path.
++ */
++#define VENUS_COPY_THREADS 4
++
++struct plane_copy {
++    uint8_t *destination;
++    const uint8_t *source;
++    uint32_t destination_stride;
++    uint32_t source_stride;
++    size_t destination_uv_offset;
++    size_t source_uv_offset;
++    uint32_t row_bytes;
++    unsigned int height;
++};
++
++struct plane_copy_slice {
++    const struct plane_copy *job;
++    unsigned int index;
++    unsigned int count;
++};
++
++static void *copy_planes_slice(void *opaque)
++{
++    const struct plane_copy_slice *slice = opaque;
++    const struct plane_copy *job = slice->job;
++    /* Total rows: luma height plus chroma height/2; slice them evenly. */
++    unsigned int total = job->height + job->height / 2u;
++    unsigned int first = (unsigned int)((uint64_t)total * slice->index / slice->count);
++    unsigned int last = (unsigned int)((uint64_t)total * (slice->index + 1) / slice->count);
++    unsigned int row;
++
++    for (row = first; row < last; row++) {
++        if (row < job->height)
++            memcpy(job->destination + (size_t)row * job->destination_stride,
++                   job->source + (size_t)row * job->source_stride,
++                   job->row_bytes);
++        else
++            memcpy(job->destination + job->destination_uv_offset +
++                       (size_t)(row - job->height) * job->destination_stride,
++                   job->source + job->source_uv_offset +
++                       (size_t)(row - job->height) * job->source_stride,
++                   job->row_bytes);
++    }
++    return NULL;
++}
++
++static void copy_planes_parallel(const struct plane_copy *job)
++{
++    struct plane_copy_slice slices[VENUS_COPY_THREADS];
++    pthread_t threads[VENUS_COPY_THREADS];
++    bool started[VENUS_COPY_THREADS] = { false };
++    unsigned int count = VENUS_COPY_THREADS;
++    unsigned int index;
++
++    /* Small frames are not worth the thread start-up. */
++    if ((size_t)job->row_bytes * job->height < 2u * 1024u * 1024u)
++        count = 1;
++
++    for (index = 0; index < count; index++)
++        slices[index] = (struct plane_copy_slice) {
++            .job = job, .index = index, .count = count,
++        };
++    for (index = 1; index < count; index++)
++        started[index] = pthread_create(&threads[index], NULL,
++                                        copy_planes_slice,
++                                        &slices[index]) == 0;
++    copy_planes_slice(&slices[0]);
++    for (index = 1; index < count; index++) {
++        if (started[index])
++            pthread_join(threads[index], NULL);
++        else
++            copy_planes_slice(&slices[index]);
++    }
++}
++
+ int venus_surface_copy_from_yuv420(
+     struct venus_surface *surface, const uint8_t *source,
+     size_t source_size, uint32_t source_stride,
+@@ -341,7 +497,6 @@ int venus_surface_copy_from_yuv420(
+     size_t source_required;
+     size_t destination_required;
+     uint32_t row_bytes;
+-    unsigned int row;
+     int status;
+     int end_status;
+ 
+@@ -385,17 +540,20 @@ int venus_surface_copy_from_yuv420(
+     if (status < 0)
+         return status;
+ 
+-    memset(surface->data, 0, surface->capacity);
+-    for (row = 0; row < height; row++)
+-        memcpy(surface->data +
+-                   (size_t)row * destination_stride,
+-               source + (size_t)row * source_stride, row_bytes);
+-    for (row = 0; row < height / 2u; row++)
+-        memcpy(surface->data + destination_uv_offset +
+-                   (size_t)row * destination_stride,
+-               source + source_uv_offset +
+-                   (size_t)row * source_stride,
+-               row_bytes);
++    {
++        struct plane_copy job = {
++            .destination = surface->data,
++            .source = source,
++            .destination_stride = destination_stride,
++            .source_stride = source_stride,
++            .destination_uv_offset = destination_uv_offset,
++            .source_uv_offset = source_uv_offset,
++            .row_bytes = row_bytes,
++            .height = height,
++        };
++
++        copy_planes_parallel(&job);
++    }
+ 
+     surface->data_size = destination_required;
+     surface->ready = true;
+@@ -1404,6 +1562,11 @@ static VAStatus backend_export_surface_handle(
+ 
+     if (!backend || !descriptor)
+         return VA_STATUS_ERROR_INVALID_PARAMETER;
++    if (getenv("VENUS_DBG"))
++        fprintf(stderr, "[venus] export surf=0x%x memtype=0x%x flags=0x%x (SEP=%d PRIME2=%d)\n",
++                surface_id, memory_type, flags,
++                !!(flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS),
++                memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2);
+     if (memory_type !=
+         VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2 ||
+         !(flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS))
+@@ -1411,6 +1574,9 @@ static VAStatus backend_export_surface_handle(
+ 
+     pthread_mutex_lock(&backend->mutex);
+     surface = venus_backend_find_surface(backend, surface_id);
++    if (getenv("VENUS_DBG"))
++        fprintf(stderr, "[venus] export surf=0x%x found=%d dma_backed=%d dma_fd=%d\n",
++                surface_id, !!surface, surface?surface->dma_backed:-1, surface?surface->dma_fd:-99);
+     if (!surface || !surface->dma_backed ||
+         surface->dma_fd < 0) {
+         pthread_mutex_unlock(&backend->mutex);
+diff --git a/src/v4l2_decoder.c b/src/v4l2_decoder.c
+index 56cf60a..8cf08f8 100644
+--- a/src/v4l2_decoder.c
++++ b/src/v4l2_decoder.c
+@@ -46,6 +46,16 @@ struct venus_v4l2_decoder {
+  * decoded size through a source-change event, after which NV12 CAPTURE can be
+  * configured and queued.
+  */
++/* VENUS_DBG tracing; cached because the pump runs per frame. */
++static bool venus_dbg(void)
++{
++    static int enabled = -1;
++
++    if (enabled < 0)
++        enabled = getenv("VENUS_DBG") != NULL;
++    return enabled;
++}
++
+ static int xioctl(int fd, unsigned long request, void *argument)
+ {
+     int result;
+@@ -90,6 +100,31 @@ static int set_output_format(
+         return -EINVAL;
+ 
+     decoder->output_format = format.fmt.pix_mp;
++
++    /*
++     * Venus picks its core clock from the session's frame rate (default 30),
++     * just enough to keep up when frames are pipelined. VA-API clients such as
++     * Firefox sync each surface right after submitting it, so every frame pays
++     * the full decode latency serially; at the 4K30 clock that alone is ~30 ms.
++     * Declare 60 fps so Venus clocks up (4K: its top level) and each frame
++     * finishes sooner. VENUS_VAAPI_DECODE_FPS=<n> overrides it, 0 keeps the
++     * kernel's default. Needs a kernel whose SM8250 OPP table can reach the
++     * higher levels (mothershipOS patch 0020); without it the clock request
++     * fails and the load check can reject the session.
++     */
++    {
++        const char *value = getenv("VENUS_VAAPI_DECODE_FPS");
++        unsigned long fps = value ? strtoul(value, NULL, 10) : 60;
++        struct v4l2_streamparm parm = {
++            .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
++        };
++
++        if (fps > 0) {
++            parm.parm.output.timeperframe.numerator = 1;
++            parm.parm.output.timeperframe.denominator = (uint32_t)fps;
++            (void)xioctl(decoder->fd, VIDIOC_S_PARM, &parm);
++        }
++    }
+     return 0;
+ }
+ 
+@@ -122,6 +157,7 @@ static int set_capture_format(struct venus_v4l2_decoder *decoder)
+     }
+ 
+     decoder->capture_format = format.fmt.pix_mp;
++    if (venus_dbg()) fprintf(stderr, "[venus] capfmt %ux%u fourcc=%.4s planes=%u sizeimage=%u bpl=%u\n", format.fmt.pix_mp.width, format.fmt.pix_mp.height, (char*)&format.fmt.pix_mp.pixelformat, format.fmt.pix_mp.num_planes, format.fmt.pix_mp.plane_fmt[0].sizeimage, format.fmt.pix_mp.plane_fmt[0].bytesperline);
+     return 0;
+ }
+ 
+@@ -321,7 +357,7 @@ static int verify_device(struct venus_v4l2_decoder *decoder)
+                ? capability.device_caps
+                : capability.capabilities;
+ 
+-    if (strcmp((const char *)capability.driver, "qcom-venus") != 0 ||
++    if ((strcmp((const char *)capability.driver, "qcom-venus") != 0 && strcmp((const char *)capability.driver, "virtio-media") != 0) ||
+         !strstr((const char *)capability.card, "decoder") ||
+         !(caps & V4L2_CAP_VIDEO_M2M_MPLANE) ||
+         !(caps & V4L2_CAP_STREAMING))
+@@ -392,21 +428,35 @@ int venus_v4l2_decoder_open(
+     if (status < 0)
+         goto fail;
+ 
+-    if (decoder->coded_format == V4L2_PIX_FMT_HEVC) {
++    /*
++     * A VA-API client assigns one surface per picture and expects each
++     * decoded frame to become available promptly; it reorders to display
++     * order itself using the surface timestamps. Ask the decoder to emit
++     * frames in decode order with zero display delay so a per-surface sync
++     * never blocks waiting for the codec's internal reorder window to
++     * fill. This matters for every reordering codec (H.264/HEVC B-frames),
++     * not only HEVC. Non-fatal: some kernels/codecs do not expose the
++     * control, in which case the decoder keeps its default behavior.
++     */
++    {
+         struct v4l2_control delay = {
+-            .id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY,
+-            .value = 0,
++            .id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE,
++            .value = 1,
+         };
+ 
+         if (xioctl(decoder->fd, VIDIOC_S_CTRL, &delay) < 0) {
+-            status = decoder_error(decoder, "S_CTRL(DISPLAY_DELAY)");
+-            goto fail;
+-        }
+-        delay.id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE;
+-        delay.value = 1;
+-        if (xioctl(decoder->fd, VIDIOC_S_CTRL, &delay) < 0) {
+-            status = decoder_error(decoder, "S_CTRL(DISPLAY_DELAY_ENABLE)");
+-            goto fail;
++            if (venus_dbg())
++                fprintf(stderr,
++                        "[venus] DISPLAY_DELAY_ENABLE unsupported errno=%d\n",
++                        errno);
++        } else {
++            delay.id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY;
++            delay.value = 0;
++            if (xioctl(decoder->fd, VIDIOC_S_CTRL, &delay) < 0 &&
++                venus_dbg())
++                fprintf(stderr,
++                        "[venus] DISPLAY_DELAY set unsupported errno=%d\n",
++                        errno);
+         }
+     }
+ 
+@@ -485,6 +535,7 @@ static int dequeue_capture(struct venus_v4l2_decoder *decoder,
+                 return 0;
+             return decoder_error(decoder, "VIDIOC_DQBUF(CAPTURE)");
+         }
++        if (venus_dbg()) fprintf(stderr, "[venus] DQBUF cap idx=%u bytesused=%u flags=0x%x\n", buffer.index, planes[0].bytesused, buffer.flags);
+ 
+         if (buffer.index >= decoder->capture_count ||
+             planes[0].bytesused > decoder->capture[buffer.index].length ||
+@@ -548,8 +599,10 @@ static int dequeue_events(struct venus_v4l2_decoder *decoder,
+             int status;
+ 
+             decoder->source_changes++;
++            if (venus_dbg()) fprintf(stderr, "[venus] SOURCE_CHANGE #%u cap_streaming=%d\n", decoder->source_changes, decoder->capture_streaming);
+             if (!decoder->capture_streaming) {
+                 status = setup_capture(decoder);
++                if (venus_dbg()) fprintf(stderr, "[venus] setup_capture -> %d errno=%d\n", status, errno);
+                 if (status < 0)
+                     return status;
+             } else {
+@@ -593,10 +646,24 @@ int venus_v4l2_decoder_pump(struct venus_v4l2_decoder *decoder,
+     if (end_of_stream)
+         *end_of_stream = false;
+ 
++    /*
++     * virtio-media reports POLLOUT whenever any OUTPUT buffer is not queued,
++     * not only when one completed, so only wait for it when every OUTPUT
++     * buffer is queued; otherwise poll returns at once and the caller spins.
++     */
+     poll_fd = (struct pollfd) {
+         .fd = decoder->fd,
+-        .events = POLLIN | POLLOUT | POLLPRI,
++        .events = POLLIN | POLLPRI,
+     };
++    {
++        unsigned int index;
++
++        for (index = 0; index < decoder->output_count; index++)
++            if (!decoder->output[index].queued)
++                break;
++        if (index == decoder->output_count)
++            poll_fd.events |= POLLOUT;
++    }
+ 
+     do {
+         status = poll(&poll_fd, 1, timeout_ms);
+@@ -605,6 +672,7 @@ int venus_v4l2_decoder_pump(struct venus_v4l2_decoder *decoder,
+         return decoder_error(decoder, "poll");
+     if (status == 0)
+         return -ETIMEDOUT;
++    if (venus_dbg()) fprintf(stderr, "[venus] poll revents=0x%x cap_streaming=%d\n", poll_fd.revents, decoder->capture_streaming);
+ 
+     if (poll_fd.revents & POLLPRI) {
+         status = dequeue_events(decoder, &made_progress);
+@@ -686,6 +754,8 @@ int venus_v4l2_decoder_submit(struct venus_v4l2_decoder *decoder,
+         return decoder_error(decoder, "VIDIOC_QBUF(OUTPUT)");
+ 
+     decoder->output[index].queued = true;
++    if (venus_dbg()) fprintf(stderr, "[venus] submit OUTPUT idx=%d size=%zu\n", index, size);
++    if (getenv("VENUS_DUMP")) { FILE *df = fopen(getenv("VENUS_DUMP"), "ab"); if (df) { fwrite(data, 1, size, df); fclose(df); } }
+     return 0;
+ }
+ 
+diff --git a/src/v4l2_encoder.c b/src/v4l2_encoder.c
+index b28af80..fc435d1 100644
+--- a/src/v4l2_encoder.c
++++ b/src/v4l2_encoder.c
+@@ -87,7 +87,7 @@ static int verify_device(struct venus_v4l2_encoder *encoder)
+                ? capability.device_caps
+                : capability.capabilities;
+ 
+-    if (strcmp((const char *)capability.driver, "qcom-venus") != 0 ||
++    if ((strcmp((const char *)capability.driver, "qcom-venus") != 0 && strcmp((const char *)capability.driver, "virtio-media") != 0) ||
+         !strstr((const char *)capability.card, "encoder") ||
+         !(caps & V4L2_CAP_VIDEO_M2M_MPLANE) ||
+         !(caps & V4L2_CAP_STREAMING)) {
+diff --git a/src/v4l2_probe.c b/src/v4l2_probe.c
+index 6b16f5b..c17c2f8 100644
+--- a/src/v4l2_probe.c
++++ b/src/v4l2_probe.c
+@@ -32,7 +32,7 @@ static int xioctl(int fd, unsigned long request, void *argument)
+ 
+ static bool qcom_venus_device(const struct v4l2_capability *cap)
+ {
+-    return strcmp((const char *)cap->driver, "qcom-venus") == 0;
++    return (strcmp((const char *)cap->driver, "qcom-venus") == 0 || strcmp((const char *)cap->driver, "virtio-media") == 0);
+ }
+ 
+ static bool device_role(const struct v4l2_capability *cap,

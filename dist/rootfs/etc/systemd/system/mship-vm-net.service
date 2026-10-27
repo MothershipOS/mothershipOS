@@ -1,0 +1,12 @@
+[Unit]
+Description=mothershipOS VM networking (taps, DHCP; internet via the hardware handover)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/mship-system net
+
+[Install]
+WantedBy=multi-user.target

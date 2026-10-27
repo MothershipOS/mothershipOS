@@ -1,0 +1,3 @@
+# The dwc3 drops its UDC while the USB-C port is a host (dock, display) and registers it again as a device:
+# bind the dev link gadget (host-initrd's "m": NCM 10.42.0.2 + ACM) again so the PC link comes back by itself.
+ACTION=="add", SUBSYSTEM=="udc", RUN+="/usr/local/sbin/mship-system gadget-rebind %k"

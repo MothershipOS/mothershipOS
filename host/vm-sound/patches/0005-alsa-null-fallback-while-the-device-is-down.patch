@@ -1,0 +1,59 @@
+mothershipOS: while the device can't be opened (the external display's audio before the monitor is lit, or while
+it is unplugged), run the guest's stream on ALSA "null" with the same parameters instead of failing: a guest
+that sees prepare fail writes the device off (PipeWire falls back to a dummy output, seen at every VM start, as
+the guest probes its card a few seconds before the monitor is lit). prepare() reopens the device on every
+playback start, so the sound comes once the device is up.
+
+--- a/src/audio_backends/alsa.rs
++++ b/src/audio_backends/alsa.rs
+@@ -50,15 +50,33 @@
+     }
+ }
+ 
++// The guest's stream on the device ("default"). While the device can't be opened or configured (mothershipOS:
++// the external display's audio, before the monitor is lit or while it is unplugged), the stream runs on "null" with
++// the same parameters, so the guest sees a working device (it writes off one that fails) and its audio is
++// discarded; the error is returned so callers know, and prepare() tries the device again on every playback start.
+ fn update_pcm(
+     pcm_: &Arc<Mutex<PCM>>,
+     stream_id: usize,
+     streams: &RwLock<Vec<Stream>>,
+ ) -> AResult<()> {
++    if let Err(err) = update_pcm_on("default", pcm_, stream_id, streams) {
++        log::warn!("stream {stream_id}: device not available ({err}), discarding into null until it is");
++        update_pcm_on("null", pcm_, stream_id, streams)?;
++        return Err(err);
++    }
++    Ok(())
++}
++
++fn update_pcm_on(
++    name: &str,
++    pcm_: &Arc<Mutex<PCM>>,
++    stream_id: usize,
++    streams: &RwLock<Vec<Stream>>,
++) -> AResult<()> {
+     *pcm_.lock().unwrap() = {
+         let streams = streams.read().unwrap();
+         let s = &streams[stream_id];
+-        let pcm = PCM::new("default", s.direction.into(), false)?;
++        let pcm = PCM::new(name, s.direction.into(), false)?;
+ 
+         {
+             let rate = match s.params.rate {
+@@ -616,8 +634,13 @@
+             return Err(Error::Stream(err));
+         }
+         let pcm = &self.pcms[stream_id as usize];
+-        let lck = pcm.lock().unwrap();
+-        if !matches!(lck.state(), State::Running) {
++        let running = matches!(pcm.lock().unwrap().state(), State::Running);
++        if !running {
++            // reopen on the device: it may have come up since (a fallback to null otherwise, see update_pcm)
++            if let Err(err) = update_pcm(pcm, stream_id as usize, &self.streams) {
++                log::debug!("stream {stream_id}: prepare: {err}");
++            }
++            let lck = pcm.lock().unwrap();
+             // Fail gracefully if Prepare does not succeed.
+             if let Err(err) = lck.prepare() {
+                 log::error!("Could not prepare stream {stream_id}; ALSA returned: {err}");

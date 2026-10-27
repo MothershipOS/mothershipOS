@@ -1,0 +1,16 @@
+diff --git a/src/drm/msm/msm_renderer.c b/src/drm/msm/msm_renderer.c
+index ba358c9..1e441da 100644
+--- a/src/drm/msm/msm_renderer.c
++++ b/src/drm/msm/msm_renderer.c
+@@ -260,7 +260,10 @@ msm_renderer_probe(int fd, struct virgl_renderer_capset_drm *capset)
+    get_param32(fd, MSM_PARAM_RAYTRACING, &capset->u.msm.has_raytracing);
+    get_param64(fd, MSM_PARAM_UCHE_TRAP_BASE, &capset->u.msm.uche_trap_base);
+ 
+-   capset->u.msm.has_cached_coherent = has_cached_coherent(fd);
++   /* mothershipOS: KVM maps cacheable PFNMAP host memory into a guest only with stage-2 FWB (ARMv8.4,
++    * kvm_supports_cacheable_pfnmap()); without it KVM_SET_USER_MEMORY_REGION fails and so does every map of a
++    * cached BO. Advertise write-combined only, unless VIRGL_MSM_CACHED_COHERENT is set (SM8250 A77/A55: no FWB). */
++   capset->u.msm.has_cached_coherent = getenv("VIRGL_MSM_CACHED_COHERENT") ? has_cached_coherent(fd) : 0;
+    capset->u.msm.has_preemption = has_preemption(fd, capset->u.msm.priorities);
+ 
+    /* NOTE: on the guest side, with new guest userspace and old host

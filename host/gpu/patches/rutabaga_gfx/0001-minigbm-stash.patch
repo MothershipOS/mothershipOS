@@ -1,0 +1,51 @@
+Patch rutabaga_gfx 0.1.80 (crates.io copy): minigbm gralloc's one-buffer stash.
+
+GET_IMAGE_REQUIREMENTS allocates the buffer and stashes it for the CREATE_BLOB that follows. Upstream fails every
+later query with AlreadyInUse once a query was not followed by its CREATE_BLOB; the guest then sees zeroed
+requirements, a size-0 blob (EINVAL) and caches that failure. Here a new query replaces a stale stash, and a
+CREATE_BLOB whose stash doesn't match allocates afresh (minigbm layouts are deterministic, so the result is the
+same buffer layout the guest was told about).
+
+diff -ruN a/src/rutabaga_gralloc/minigbm.rs b/src/rutabaga_gralloc/minigbm.rs
+--- a/src/rutabaga_gralloc/minigbm.rs	2026-10-26 08:31:31.876006770 +0000
++++ b/src/rutabaga_gralloc/minigbm.rs	2026-10-26 08:31:31.913007766 +0000
+@@ -141,10 +141,7 @@
+         // minigbm does have the ability to query image requirements without allocating memory
+         // via the TEST_ALLOC flag.  However, support has only been added in i915.  Until this
+         // flag is supported everywhere, do the actual allocation here and stash it away.
+-        if self.last_buffer.is_some() {
+-            return Err(RutabagaError::AlreadyInUse);
+-        }
+-
++        // mothershipOS: a stash left by a query without its CREATE_BLOB is stale; replace it
+         self.last_buffer = Some(Arc::new(gbm_buffer));
+         reqs.info = info;
+         reqs.size = size;
+@@ -154,18 +151,17 @@
+     fn allocate_memory(&mut self, reqs: ImageMemoryRequirements) -> RutabagaResult<MagmaGpuHandle> {
+         let last_buffer = self.last_buffer.take();
+         if let Some(gbm_buffer) = last_buffer {
+-            if gbm_buffer.width() != reqs.info.width
+-                || gbm_buffer.height() != reqs.info.height
+-                || gbm_buffer.format() != reqs.info.drm_format
++            // mothershipOS: a stash for another image is stale; allocate this one afresh below
++            if gbm_buffer.width() == reqs.info.width
++                && gbm_buffer.height() == reqs.info.height
++                && gbm_buffer.format() == reqs.info.drm_format
+             {
+-                return Err(RutabagaError::InvalidGrallocDimensions);
++                let dmabuf = gbm_buffer.export()?.into();
++                return Ok(MagmaGpuHandle {
++                    os_handle: dmabuf,
++                    handle_type: MAGMA_GPU_HANDLE_TYPE_MEM_DMABUF,
++                });
+             }
+-
+-            let dmabuf = gbm_buffer.export()?.into();
+-            return Ok(MagmaGpuHandle {
+-                os_handle: dmabuf,
+-                handle_type: MAGMA_GPU_HANDLE_TYPE_MEM_DMABUF,
+-            });
+         }
+ 
+         // TODO(b/315870313): Add safety comment

@@ -1,0 +1,10 @@
+[package]
+name = "mship-inputd"
+description = "mothershipOS VM input bridge: lends the phone's touchscreen and buttons to a crosvm VM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mship-core.workspace = true
+libc.workspace = true

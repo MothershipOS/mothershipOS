@@ -1,0 +1,12 @@
+[Unit]
+Description=mothershipOS cameras (mship.camera: the phone's cameras for VMs)
+# its nodes must exist before a VM starts (the launcher proxies them)
+Before=mothershipd.service
+
+[Service]
+ExecStart=/usr/local/sbin/mship-camera
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

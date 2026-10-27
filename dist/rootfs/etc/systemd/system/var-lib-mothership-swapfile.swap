@@ -1,0 +1,10 @@
+[Unit]
+Description=mothershipOS swap file (room for VMs side by side; RAM stays first)
+ConditionPathExists=/var/lib/mothership/swapfile
+
+[Swap]
+What=/var/lib/mothership/swapfile
+Priority=10
+
+[Install]
+WantedBy=swap.target

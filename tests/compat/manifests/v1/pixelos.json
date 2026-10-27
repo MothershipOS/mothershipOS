@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "name": "PixelOS (Android 16)",
+  "min_mothership": "2026.1",
+  "platform": {
+    "id": "cuttlefish-arm64",
+    "version": "1.0"
+  },
+  "boot": {
+    "kernel": "pkg/Image",
+    "initrd": "pkg/initrd-crosvm.img",
+    "cmdline": "pkg/cmdline.crosvm",
+    "disk": "disk.img"
+  },
+  "resources": {
+    "cpus": 4,
+    "memory_mb": 4096
+  },
+  "slots": {
+    "display": {
+      "contract": "mship.display",
+      "version": "1.0"
+    },
+    "power": {
+      "contract": "mship.display-power",
+      "version": "1.0",
+      "required": false
+    },
+    "touch": {
+      "contract": "mship.touch",
+      "version": "1.0"
+    },
+    "keys": {
+      "contract": "mship.keys",
+      "version": "1.0"
+    },
+    "gpu": {
+      "contract": "mship.gpu",
+      "version": "1.0",
+      "params": {
+        "context_types": [
+          "gfxstream-gles",
+          "gfxstream-composer"
+        ]
+      }
+    },
+    "internet": {
+      "contract": "mship.net-shared",
+      "version": "1.0",
+      "required": false
+    }
+  },
+  "handover": {
+    "when_shown": [
+      "display",
+      "buttons"
+    ],
+    "while_running": [
+      "internet"
+    ]
+  }
+}

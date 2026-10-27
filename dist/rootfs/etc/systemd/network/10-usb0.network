@@ -1,0 +1,9 @@
+[Match]
+Name=usb0
+[Network]
+Address=10.42.0.2/24
+KeepConfiguration=static
+# fallback default route via the dev PC; Wi-Fi (NetworkManager, metric 600) is preferred
+[Route]
+Gateway=10.42.0.1
+Metric=2000
