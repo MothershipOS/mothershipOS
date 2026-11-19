@@ -1,6 +1,7 @@
 //! What the device services share: logging, sockets for the session user; kernel uevents and polling (from
 //! mship_core::uevent).
 
+pub mod fpc;
 pub mod mw;
 pub mod qrtr;
 pub mod netlink;
