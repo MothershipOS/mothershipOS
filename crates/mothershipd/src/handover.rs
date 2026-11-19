@@ -2,7 +2,7 @@
 //!
 //! Every piece of hardware has one assigned owner (mothershipOS or a VM) in /var/lib/mothership/config/hardware.json
 //! (Settings › Hardware). Assigned hardware is lent automatically: screen hardware (display, buttons) while the VM
-//! is shown, network hardware (wifi-2g, wifi-5g, internet), bluetooth, usb, cellular, cameras and display-ext while it
+//! is shown, network hardware (wifi-2g, wifi-5g, internet), bluetooth, usb, cellular, cameras, speaker, earpiece, headset, microphone and display-ext while it
 //! runs.
 //!
 //! display = panel + touchscreen. VMs with "display_mode": "lease" (crosvm + mship-vm-display) get the panel
@@ -12,7 +12,8 @@
 //! wifi-2g / wifi-5g = one Wi-Fi band (mship.wifi, mship-wifi-bridge). internet = shared internet (the phone's
 //! uplink NATed to the VM). bluetooth (mship.bt, mship-bt-bridge), usb (mship.usb, mship-usb), cellular (mship.modem,
 //! mship-modem: the modem with its SIM, calls, SMS and mobile data), cameras (mship.camera, mship-camera:
-//! every camera). display-ext = the
+//! every camera), speaker, earpiece, headset and microphone (mship.audio, mship-audio: the phone's audio devices, each
+//! its own stream in the guest). display-ext = the
 //! USB-C external display (DP-1), leased to the VM's presenter; sway itself never uses it.
 
 use std::collections::BTreeMap;
@@ -32,13 +33,16 @@ const SESSION_SCALE: &str = "2";
 /// display-ext: leased to a VM, never sway's
 const EXT_OUT: &str = "DP-1";
 /// closed when their VM stops
-const NETWORK: &[&str] = &["internet", "display-ext", "bluetooth", "usb", "wifi-2g", "wifi-5g", "cellular", "cameras"];
+const NETWORK: &[&str] = &["internet", "display-ext", "bluetooth", "usb", "wifi-2g", "wifi-5g", "cellular", "cameras", "speaker", "earpiece", "headset", "microphone"];
 const BANDS: &[(&str, &str)] = &[("wifi-2g", "2g"), ("wifi-5g", "5g")];
 const ASSOC: &str = "/var/lib/mothership/config/hardware.json";
 const WIFI_BRIDGE: &str = "/run/mothership/wifi-bridge.sock";
-const BRIDGES: &[(&str, &str)] =
-    &[("bluetooth", "/run/mothership/bt-bridge.sock"), ("usb", "/run/mothership/usb.sock"), ("cellular", "/run/mothership/modem.sock"),
-      ("cameras", "/run/mothership/camera.sock")];
+/// (item, the device service's control socket, the handle within that service: appended to attach/detach)
+const BRIDGES: &[(&str, &str, &str)] =
+    &[("bluetooth", "/run/mothership/bt-bridge.sock", ""), ("usb", "/run/mothership/usb.sock", ""),
+      ("cellular", "/run/mothership/modem.sock", ""), ("cameras", "/run/mothership/camera.sock", ""),
+      ("speaker", "/run/mothership/audio.sock", "speaker"), ("earpiece", "/run/mothership/audio.sock", "earpiece"),
+      ("headset", "/run/mothership/audio.sock", "headset"), ("microphone", "/run/mothership/audio.sock", "mic")];
 /// a repeated toggle (key bounce, re-announced key state) is ignored
 const DEBOUNCE: Duration = Duration::from_millis(1500);
 /// private: who holds what, for mothershipd's own restart only
@@ -194,9 +198,9 @@ impl Handover {
                 b if BANDS.iter().any(|(n, _)| *n == b) => {
                     bridge(&format!("detach {} user", cid(&holder)), WIFI_BRIDGE);
                 }
-                b if BRIDGES.iter().any(|(n, _)| *n == b) => {
-                    let path = BRIDGES.iter().find(|(n, _)| *n == b).unwrap().1;
-                    bridge(&format!("detach {} user", base(&holder)), path);
+                b if BRIDGES.iter().any(|(n, _, _)| *n == b) => {
+                    let (_, path, handle) = BRIDGES.iter().find(|(n, _, _)| *n == b).unwrap();
+                    bridge(format!("detach {} user {handle}", base(&holder)).trim_end(), path);
                 }
                 "display-ext" => {
                     session::sway(&["lease_output", EXT_OUT, "off"]); // revokes only this output's lease
@@ -254,11 +258,11 @@ impl Handover {
                 i.st.insert(item.into(), d.clone());
                 continue;
             }
-            if let Some((_, path)) = BRIDGES.iter().find(|(n, _)| *n == item) {
+            if let Some((_, path, handle)) = BRIDGES.iter().find(|(n, _, _)| *n == item) {
                 if holder != "host" && holder != d {
-                    bridge(&format!("detach {} revoked", base(&holder)), path);
+                    bridge(format!("detach {} revoked {handle}", base(&holder)).trim_end(), path);
                 }
-                if bridge(&format!("attach {name}"), path) {
+                if bridge(format!("attach {name} {handle}").trim_end(), path) {
                     i.st.insert(item.into(), d.clone()); // kept until the VM is up
                 }
                 continue;

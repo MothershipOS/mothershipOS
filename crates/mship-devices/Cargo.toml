@@ -13,6 +13,10 @@ libc.workspace = true
 vsock = "0.5"
 
 [[bin]]
+name = "mship-audio"
+path = "src/bin/audio.rs"
+
+[[bin]]
 name = "mship-battery"
 path = "src/bin/battery.rs"
 
@@ -35,3 +39,7 @@ path = "src/bin/usb.rs"
 [[bin]]
 name = "mship-wifi-bridge"
 path = "src/bin/wifi.rs"
+
+[[bin]]
+name = "fpc-test"
+path = "src/bin/fpc_test.rs"

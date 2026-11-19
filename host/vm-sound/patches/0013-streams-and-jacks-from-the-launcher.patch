@@ -1,0 +1,198 @@
+mothershipOS: streams and jacks configured by the launcher (mship.audio 1.0: one stream per phone audio device, so the
+guest routes natively).
+- MSHIP_SOUND_STREAMS: the streams' directions, e.g. `out,out,out,in,in,in` (default: one output, one input). Each
+  stream is then a PCM device of its own in the guest (hda_fn_nid = stream id) and plays into / records from the
+  ALSA PCM `mship_pcm<stream id>`.
+- MSHIP_SOUND_JACKS: jacks as `<nid>:hp` / `<nid>:mic` (nid = the stream whose PCM the jack belongs to), reported
+  as HDA pin configurations (headphone out / mic in, 1/8" jack, presence detect), so the guest's virtio-snd driver
+  creates "Headphone" and "Mic" jacks with input switches (Android's wired accessory handling uses those).
+- Jack events: the host writes `$HOME/jacks` (`hp=0|1 mic=0|1`); a watcher posts VIRTIO_SND_EVT_JACK_(DIS)CONNECTED
+  into the event queue's buffers (kept from process_event, which used to ignore the queue) and updates the jack info.
+
+--- a/src/audio_backends/alsa.rs
++++ b/src/audio_backends/alsa.rs
+@@ -69,7 +69,13 @@
+     stream_id: usize,
+     streams: &RwLock<Vec<Stream>>,
+ ) -> AResult<()> {
+-    if let Err(err) = update_pcm_on("default", pcm_, stream_id, streams) {
++    // mothershipOS: with MSHIP_SOUND_STREAMS each stream has its own ALSA PCM, mship_pcm<stream id>
++    let device = if std::env::var_os("MSHIP_SOUND_STREAMS").is_some() {
++        format!("mship_pcm{stream_id}")
++    } else {
++        "default".to_string()
++    };
++    if let Err(err) = update_pcm_on(&device, pcm_, stream_id, streams) {
+         log::warn!("stream {stream_id}: device not available ({err}), discarding into null until it is");
+         mtrace!("stream {stream_id}: device not available ({err}), on null");
+         update_pcm_on("null", pcm_, stream_id, streams)?;
+--- a/src/device.rs
++++ b/src/device.rs
+@@ -32,6 +32,89 @@
+     ControlMessageKind, Direction, Error, IOMessage, QueueIdx, Result, SoundConfig,
+ };
+ 
++/// mothershipOS: the event queue and guest memory (kept by process_event), for jack events from the jack watcher
++static EVENT_QUEUE: std::sync::Mutex<Option<(VringRwLock, GuestMemoryAtomic<GuestMemoryMmap>)>> =
++    std::sync::Mutex::new(None);
++
++/// Post one event (VIRTIO_SND_EVT_*) into a buffer the guest gave the event queue; false if there is none yet.
++fn post_event(code: u32, data: u32) -> bool {
++    let guard = EVENT_QUEUE.lock().unwrap();
++    let Some((vring, atomic_mem)) = guard.as_ref() else {
++        return false;
++    };
++    let mem = atomic_mem.memory();
++    let chain = match vring.get_mut().get_queue_mut().iter(atomic_mem.memory()) {
++        Ok(mut it) => it.next(),
++        Err(_) => None,
++    };
++    let Some(chain) = chain else {
++        return false;
++    };
++    let Ok(mut writer) = chain.clone().writer(&mem) else {
++        return false;
++    };
++    let event = VirtioSoundEvent { hdr: VirtioSoundHeader { code: code.into() }, data: data.into() };
++    if writer.write_obj(event).is_err() {
++        return false;
++    }
++    let len = writer.bytes_written() as u32;
++    if vring.add_used(chain.head_index(), len).is_err() {
++        return false;
++    }
++    let _ = vring.signal_used_queue();
++    true
++}
++
++/// mothershipOS: the jacks from MSHIP_SOUND_JACKS, `<nid>:hp` or `<nid>:mic` separated by commas (nid = the stream
++/// whose PCM the jack belongs to), as HDA pin configurations, so the guest's driver makes "Headphone" / "Mic" jacks
++fn jacks_from_env() -> Vec<(VirtioSoundJackInfo, &'static str)> {
++    let Ok(spec) = std::env::var("MSHIP_SOUND_JACKS") else {
++        return vec![];
++    };
++    spec.split(',')
++        .filter_map(|j| {
++            let (nid, kind) = j.split_once(':')?;
++            let nid: u32 = nid.trim().parse().ok()?;
++            // pin default config: jack (31:30 = 0), device (23:20: 2 = headphone out, 0xa = mic in), 1/8" mini
++            // (19:16 = 1), association 1; caps: presence detect (bit 2) + output (bit 4) / input (bit 5)
++            let (device, caps, name) = match kind.trim() {
++                "hp" => (0x2u32, 0x14u32, "hp"),
++                "mic" => (0xa, 0x24, "mic"),
++                _ => return None,
++            };
++            let mut info = VirtioSoundJackInfo::default();
++            info.hdr.hda_fn_nid = nid.into();
++            info.hda_reg_defconf = ((device << 20) | (1 << 16) | (1 << 4)).into();
++            info.hda_reg_caps = caps.into();
++            Some((info, name))
++        })
++        .collect()
++}
++
++/// Watch $HOME/jacks (`hp=0|1 mic=0|1`, written by the host) and post jack events when a jack changes.
++fn watch_jacks(jacks: Arc<RwLock<Vec<VirtioSoundJackInfo>>>, names: Vec<&'static str>) {
++    let Some(home) = std::env::var_os("HOME") else {
++        return;
++    };
++    let path = std::path::Path::new(&home).join("jacks");
++    std::thread::spawn(move || loop {
++        std::thread::sleep(std::time::Duration::from_millis(250));
++        let state = std::fs::read_to_string(&path).unwrap_or_default();
++        for (id, name) in names.iter().enumerate() {
++            let want = state.split_whitespace().any(|kv| kv == format!("{name}=1")) as u8;
++            let have = jacks.read().unwrap()[id].connected;
++            if want == have {
++                continue;
++            }
++            let code = if want == 1 { VIRTIO_SND_EVT_JACK_CONNECTED } else { VIRTIO_SND_EVT_JACK_DISCONNECTED };
++            // the state the guest sees follows the events it got: retried until the guest has an event buffer
++            if post_event(code, id as u32) {
++                jacks.write().unwrap()[id].connected = want;
++            }
++        }
++    });
++}
++
+ pub struct VhostUserSoundThread {
+     mem: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
+     event_idx: bool,
+@@ -245,7 +328,12 @@
+                             .take(u32::from(request.count) as usize)
+                         {
+                             p = VirtioSoundPcmInfo::default();
+-                            p.hdr.hda_fn_nid = 0.into();
++                            // mothershipOS: with MSHIP_SOUND_STREAMS each stream is a PCM device of its own
++                            p.hdr.hda_fn_nid = if std::env::var_os("MSHIP_SOUND_STREAMS").is_some() {
++                                (s.id as u32).into()
++                            } else {
++                                0.into()
++                            };
+                             p.features = s.params.features;
+                             p.formats = s.formats;
+                             p.rates = s.rates;
+@@ -404,8 +492,12 @@
+         Ok(())
+     }
+ 
+-    fn process_event(&self, _vring: &VringRwLock) -> IoResult<()> {
++    fn process_event(&self, vring: &VringRwLock) -> IoResult<()> {
+         log::trace!("process_event");
++        // mothershipOS: keep the queue: the guest's buffers are filled with jack events (post_event)
++        if let Some(mem) = &self.mem {
++            *EVENT_QUEUE.lock().unwrap() = Some((vring.clone(), mem.clone()));
++        }
+         Ok(())
+     }
+ 
+@@ -505,21 +597,27 @@
+ 
+ impl VhostUserSoundBackend {
+     pub fn new(config: SoundConfig) -> Result<Self> {
+-        let streams = vec![
+-            Stream {
+-                id: 0,
+-                direction: Direction::Output,
+-                ..Stream::default()
+-            },
+-            Stream {
+-                id: 1,
+-                direction: Direction::Input,
+-                ..Stream::default()
+-            },
+-        ];
++        // mothershipOS: MSHIP_SOUND_STREAMS lists the streams' directions (`out,out,in`, ...); default one of each
++        let directions: Vec<Direction> = match std::env::var("MSHIP_SOUND_STREAMS") {
++            Ok(spec) => spec
++                .split(',')
++                .map(|d| if d.trim() == "in" { Direction::Input } else { Direction::Output })
++                .collect(),
++            Err(_) => vec![Direction::Output, Direction::Input],
++        };
++        let streams: Vec<Stream> = directions
++            .into_iter()
++            .enumerate()
++            .map(|(id, direction)| Stream { id, direction, ..Stream::default() })
++            .collect();
+         let streams_no = streams.len();
+         let streams = Arc::new(RwLock::new(streams));
+-        let jacks: Arc<RwLock<Vec<VirtioSoundJackInfo>>> = Arc::new(RwLock::new(Vec::new()));
++        let (jack_infos, jack_names): (Vec<_>, Vec<_>) = jacks_from_env().into_iter().unzip();
++        let jacks_no = jack_infos.len();
++        let jacks: Arc<RwLock<Vec<VirtioSoundJackInfo>>> = Arc::new(RwLock::new(jack_infos));
++        if jacks_no > 0 {
++            watch_jacks(jacks.clone(), jack_names);
++        }
+         let mut positions = [VIRTIO_SND_CHMAP_NONE; VIRTIO_SND_CHMAP_MAX_SIZE];
+         positions[0] = VIRTIO_SND_CHMAP_FL;
+         positions[1] = VIRTIO_SND_CHMAP_FR;
+@@ -583,7 +681,7 @@
+         Ok(Self {
+             threads,
+             virtio_cfg: VirtioSoundConfig {
+-                jacks: 0.into(),
++                jacks: Le32::from(jacks_no as u32),
+                 streams: Le32::from(streams_no as u32),
+                 chmaps: 1.into(),
+                 controls: 0.into(),

@@ -1,0 +1,11 @@
+[Unit]
+Description=mothershipOS audio devices for VMs (mship.audio: links a VM's speaker, earpiece, headset and mic streams to the phone's devices it holds)
+Before=mothershipd.service
+
+[Service]
+ExecStart=/usr/local/sbin/mship-audio
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

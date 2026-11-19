@@ -1,0 +1,88 @@
+mothershipOS: MSHIP_SOUND_TRACE=1 traces each stream's control requests (set_parameters with the guest's sizes,
+prepare, start, stop, release), the device period/buffer ALSA granted, the fallback to null and write errors, to
+stderr. This build's log output stays silent even with RUST_LOG set, which left the backend undiagnosable.
+
+--- a/src/audio_backends/alsa.rs
++++ b/src/audio_backends/alsa.rs
+@@ -54,6 +54,16 @@
+ // the external display's audio, before the monitor is lit or while it is unplugged), the stream runs on "null" with
+ // the same parameters, so the guest sees a working device (it writes off one that fails) and its audio is
+ // discarded; the error is returned so callers know, and prepare() tries the device again on every playback start.
++/// mothershipOS: MSHIP_SOUND_TRACE=1 traces the stream's control requests, device parameters and write errors to
++/// stderr (this build's log output stays silent)
++macro_rules! mtrace {
++    ($($a:tt)*) => {
++        if std::env::var_os("MSHIP_SOUND_TRACE").is_some() {
++            eprintln!("mship-sound: {}", format!($($a)*));
++        }
++    };
++}
++
+ fn update_pcm(
+     pcm_: &Arc<Mutex<PCM>>,
+     stream_id: usize,
+@@ -61,6 +71,7 @@
+ ) -> AResult<()> {
+     if let Err(err) = update_pcm_on("default", pcm_, stream_id, streams) {
+         log::warn!("stream {stream_id}: device not available ({err}), discarding into null until it is");
++        mtrace!("stream {stream_id}: device not available ({err}), on null");
+         update_pcm_on("null", pcm_, stream_id, streams)?;
+         return Err(err);
+     }
+@@ -209,6 +220,8 @@
+             // Read more at https://www.alsa-project.org/wiki/FramesPeriods.
+ 
+             pcm.hw_params(&hwp)?;
++            mtrace!("stream {stream_id}: device period {:?} buffer {:?} (guest period {} buffer {} bytes)",
++                hwp.get_period_size(), hwp.get_buffer_size(), u32::from(s.params.period_bytes), u32::from(s.params.buffer_bytes));
+         }
+         pcm
+     };
+@@ -349,6 +362,7 @@
+             Ok(f) => f,
+             Err(err) => {
+                 drop(lck);
++                mtrace!("stream {stream_id}: write: {err}, recovering");
+                 log::trace!("Recovering from {err}");
+                 p.recover(err.errno() as std::os::raw::c_int, true)?;
+                 return Ok(true);
+@@ -603,6 +617,7 @@
+     }
+ 
+     fn start(&self, stream_id: u32) -> CrateResult<()> {
++        mtrace!("stream {}: start", stream_id);
+         if stream_id >= self.streams.read().unwrap().len() as u32 {
+             log::error!(
+                 "Received Start action for stream id {} but there are only {} PCM streams.",
+@@ -631,6 +646,7 @@
+     }
+ 
+     fn prepare(&self, stream_id: u32) -> CrateResult<()> {
++        mtrace!("stream {}: prepare", stream_id);
+         if stream_id >= self.streams.read().unwrap().len() as u32 {
+             log::error!(
+                 "Received Prepare action for stream id {} but there are only {} PCM streams.",
+@@ -664,6 +680,7 @@
+     }
+ 
+     fn stop(&self, id: u32) -> CrateResult<()> {
++        mtrace!("stream {}: stop", id);
+         // Return every queued buffer to the guest and stop the device stream. The guest's driver waits for all its
+         // I/O messages before it prepares again (as it does after an underrun); buffers kept queued across STOP made
+         // that wait fail, and every later write in the guest failed with it.
+@@ -683,6 +700,7 @@
+     }
+ 
+     fn set_parameters(&self, stream_id: u32, request: VirtioSndPcmSetParams) -> CrateResult<()> {
++        mtrace!("stream {stream_id}: set_parameters period {} buffer {} channels {} format {} rate {}", u32::from(request.period_bytes), u32::from(request.buffer_bytes), request.channels, request.format, request.rate);
+         if stream_id >= self.streams.read().unwrap().len() as u32 {
+             log::error!(
+                 "Received SetParameters action for stream id {} but there are only {} PCM streams.",
+@@ -721,6 +739,7 @@
+     }
+ 
+     fn release(&self, stream_id: u32) -> CrateResult<()> {
++        mtrace!("stream {}: release", stream_id);
+         if stream_id >= self.streams.read().unwrap().len() as u32 {
+             log::error!(
+                 "Received Release action for stream id {} but there are only {} PCM streams.",

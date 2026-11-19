@@ -14,7 +14,7 @@ use crate::version::Release;
 
 /// What the user lends (the handover checklist). wifi-any = single-band radios (no per-band handles).
 pub const GROUPS: &[&str] =
-    &["display", "buttons", "wifi-2g", "wifi-5g", "wifi-any", "internet", "bluetooth", "usb", "display-ext", "cellular", "cameras"];
+    &["display", "buttons", "wifi-2g", "wifi-5g", "wifi-any", "internet", "bluetooth", "usb", "display-ext", "cellular", "cameras", "speaker", "earpiece", "headset", "microphone"];
 
 /// schema N -> a function turning an N manifest into the N+1 shape. Empty while schema 1 is the only one.
 pub type Migration = fn(Value) -> Value;
@@ -77,9 +77,18 @@ impl Manifest {
     }
 }
 
-fn inside(path: &str) -> bool {
+/// A path a manifest or package names: inside the VM directory (relative, no `..`).
+pub fn inside(path: &str) -> bool {
     let p = Path::new(path);
-    !p.is_absolute() && !p.components().any(|c| matches!(c, Component::ParentDir))
+    !path.is_empty() && !p.is_absolute() && p.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// vm.json "log": the VM's log, a file name in the VM directory (mothershipd creates it)
+pub fn log_name(d: &Map<String, Value>) -> Option<&str> {
+    match d.get("log") {
+        None => Some("qemu.log"),
+        Some(v) => v.as_str().filter(|l| inside(l) && Path::new(l).components().count() == 1),
+    }
 }
 
 fn validate(d: &Map<String, Value>) -> Result<(), ManifestError> {
@@ -114,6 +123,9 @@ fn validate(d: &Map<String, Value>) -> Result<(), ManifestError> {
     // debugging: variables for the VM's launcher and everything it starts (crosvm, the presenter)
     if d.get("env").is_some_and(|e| !e.as_object().is_some_and(|e| e.values().all(Value::is_string))) {
         return err(r#""env" must be {"NAME": "value", ...}"#);
+    }
+    if log_name(d).is_none() {
+        return err(r#""log" must be a file name in the VM directory"#);
     }
     if let Some(boot) = d.get("boot").and_then(Value::as_object) {
         for (k, v) in boot {
@@ -243,4 +255,31 @@ pub fn check(m: &Manifest, release: Release) -> Check {
     }
     c.runnable = c.errors.is_empty();
     c
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest(extra: Value) -> Value {
+        let mut m = serde_json::json!({"schema": 1, "name": "t", "platform": {"id": "efi-virt-arm64", "version": "1.0"}});
+        m.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        m
+    }
+
+    #[test]
+    fn paths_stay_in_the_vm_directory() {
+        assert!(parse(&manifest(serde_json::json!({"boot": {"kernel": "pkg/Image", "disk": "./hdd.raw"}, "log": "vm.log"}))).is_ok());
+        for bad in [
+            serde_json::json!({"boot": {"disk": "/dev/mmcblk0"}}),
+            serde_json::json!({"boot": {"kernel": "../other/Image"}}),
+            serde_json::json!({"boot": {"kernel": ""}}),
+            serde_json::json!({"log": "/etc/shadow"}),
+            serde_json::json!({"log": "../x.log"}),
+            serde_json::json!({"log": "logs/vm.log"}),
+            serde_json::json!({"log": 1}),
+        ] {
+            assert!(parse(&manifest(bad.clone())).is_err(), "{bad}");
+        }
+    }
 }

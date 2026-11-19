@@ -1,0 +1,16 @@
+mothershipOS: a playback request's payload is everything readable after the transfer header. virtio-queue's
+`Reader::available_bytes()` already counts only what is left to read, so subtracting `bytes_read()` (the 4-byte
+header) a second time cut the last frame of every guest period: with S16 stereo, one frame in 1024 was lost
+(a phase jump 47 times a second, heard as roughness on everything a VM plays).
+
+--- a/src/device.rs
++++ b/src/device.rs
+@@ -549,7 +549,7 @@
+             stream_ids.insert(stream_id);
+ 
+             let payload_len = match direction {
+-                Direction::Output => reader.available_bytes() - reader.bytes_read(),
++                Direction::Output => reader.available_bytes(),
+                 Direction::Input => {
+                     let writer = desc_chain
+                         .clone()

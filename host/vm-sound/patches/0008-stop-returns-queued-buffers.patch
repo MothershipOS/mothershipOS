@@ -1,0 +1,40 @@
+mothershipOS: on STOP, return every queued buffer to the guest and stop the device stream. The guest's virtio-snd
+driver waits for all its I/O messages before it prepares the stream again, which it does after every underrun;
+the backend only marked the stream stopped and kept the buffers queued (0004 keeps them for a stream that is not
+started yet, which is still right before START), so that wait failed and every later write in the guest failed
+too: Android played ~300 ms and then nothing ("Error writing into ALSA"). Dropping the device stream makes the next
+PREPARE reopen it clean.
+
+--- a/src/audio_backends/alsa.rs
++++ b/src/audio_backends/alsa.rs
+@@ -657,16 +657,20 @@
+     }
+ 
+     fn stop(&self, id: u32) -> CrateResult<()> {
+-        if let Err(err) = self
+-            .streams
+-            .write()
+-            .unwrap()
+-            .get_mut(id as usize)
+-            .ok_or(Error::StreamWithIdNotFound(id))?
+-            .state
+-            .stop()
+-        {
+-            log::error!("Stream {id} stop {err}");
++        // Return every queued buffer to the guest and stop the device stream. The guest's driver waits for all its
++        // I/O messages before it prepares again (as it does after an underrun); buffers kept queued across STOP made
++        // that wait fail, and every later write in the guest failed with it.
++        let pending = {
++            let mut streams = self.streams.write().unwrap();
++            let st = streams.get_mut(id as usize).ok_or(Error::StreamWithIdNotFound(id))?;
++            if let Err(err) = st.state.stop() {
++                log::error!("Stream {id} stop {err}");
++            }
++            std::mem::take(&mut st.requests)
++        };
++        drop(pending);
++        if let Some(pcm) = self.pcms.get(id as usize) {
++            let _ = alsa::pcm::PCM::drop(&pcm.lock().unwrap());
+         }
+         Ok(())
+     }

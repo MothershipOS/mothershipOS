@@ -62,6 +62,173 @@ pub fn camera_nodes(vm: &str) -> Vec<String> {
     links.iter().filter_map(|l| std::fs::canonicalize(l).ok()).map(|p| p.to_string_lossy().into_owned()).collect()
 }
 
+pub const VHOST_SOUND: &str = "/usr/local/bin/vhost-device-sound";
+
+/// mship.audio 1.0: the guest's streams, in stream (= guest PCM device) order: direction, the VM's node suffix,
+/// description. Outputs play into the VM's sink `mship-vm-<vm>.<suffix>`, inputs record from its source of that name.
+pub const AUDIO_STREAMS: &[(&str, &str, &str)] = &[
+    ("out", "speaker", "speaker"),
+    ("out", "earpiece", "earpiece"),
+    ("out", "headset", "headset"),
+    ("in", "mic", "microphone"),
+    ("in", "backmic", "back microphone"),
+    ("in", "headsetmic", "headset microphone"),
+];
+/// the headset jack: headphone switch on the headset output (stream 2), mic switch on the headset mic (stream 5)
+const AUDIO_JACKS: &str = "2:hp,5:mic";
+
+/// The backend's ALSA PCMs (mship_pcm<stream>): each stream into / from its own PipeWire node of the VM.
+fn audio_asoundrc(base: &str) -> String {
+    AUDIO_STREAMS.iter().enumerate()
+        .map(|(i, (_, suffix, _))| format!("pcm.mship_pcm{i} {{ type plug; slave.pcm \"pipewire:NODE={base}.{suffix}\" }}\n"))
+        .collect()
+}
+
+/// Run pw-loopback with `args` while the VM runs: it ends with PipeWire (a session restart), and the VM's stream then
+/// has nothing to play into or record from (it never falls back to another node) until it is back.
+fn supervise_loopback(vm: &Vm, args: Vec<String>, runtime: &str, log: &std::fs::File) -> Res<()> {
+    let (stop, rt, lb_log) = (vm.stop.clone(), runtime.to_string(), log.try_clone().map_err(err)?);
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            let child = Command::new("pw-loopback").args(&args).env("XDG_RUNTIME_DIR", &rt)
+                .stdin(Stdio::null()).stdout(Stdio::null())
+                .stderr(lb_log.try_clone().map(Stdio::from).unwrap_or(Stdio::null())).spawn();
+            let Ok(mut child) = child else {
+                std::thread::sleep(Duration::from_secs(2));
+                continue;
+            };
+            while !stop.load(Ordering::Relaxed) && child.try_wait().ok().flatten().is_none() {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
+    Ok(())
+}
+
+/// The VM's audio slot (mship.audio 1.x): a virtio-snd device (vhost-device-sound) with one stream per phone audio
+/// device (AUDIO_STREAMS) and the headset jack, so the guest routes like on the phone. Each stream plays into / records
+/// from its own PipeWire node of the VM, `mship-vm-<vm>.<device>` (pw-loopbacks, helpers of this VM); mship-audio links
+/// them to the phone's devices the VM holds (speaker, earpiece, headset, microphone), to silence otherwise, and tells
+/// the backend the jack state (`<vm dir>/audio/jacks`). The streams never fall back to other nodes. The crosvm
+/// arguments for the device; none without the slot or when its backend does not come up.
+pub fn audio_slot(vm: &Vm) -> Res<Vec<String>> {
+    let slot = vm.conf["slots"].as_object().is_some_and(|s| s.values().any(|x| x["contract"] == "mship.audio"));
+    if !slot || env_or("MSHIP_VM_SOUND", "1") == "0" {
+        return Ok(vec![]);
+    }
+    let base = format!("mship-vm-{}", vm.name);
+    let home = vm.dir.join("audio");
+    std::fs::create_dir_all(&home).map_err(err)?;
+    std::fs::write(home.join(".asoundrc"), audio_asoundrc(&base)).map_err(err)?;
+    std::fs::write(home.join("jacks"), "hp=0 mic=0\n").map_err(err)?;
+    let sock = vm.dir.join("sound.sock");
+    let _ = std::fs::remove_file(&sock);
+    let runtime = format!("/run/user/{}", unsafe { libc::getuid() });
+    let title = vm.conf["name"].as_str().unwrap_or(&vm.name).replace('"', "");
+    let log = log_file(&vm.dir, "sound")?;
+    for (dir, suffix, what) in AUDIO_STREAMS {
+        let node = format!("{base}.{suffix}");
+        let args = if *dir == "out" {
+            // a sink; its output `.out` is linked by mship-audio. Passive output: the phone's device only runs while
+            // the guest plays into it
+            vec![
+                "-n".to_string(), node.clone(),
+                "--capture-props".into(), format!("{{ media.class=Audio/Sink node.name={node} node.description=\"{title} {what}\" \
+                                                  node.virtual=true priority.session=0 priority.driver=0 }}"),
+                "--playback-props".into(), format!("{{ node.name={node}.out node.description=\"{title} {what}\" \
+                                                   node.autoconnect=false node.dont-reconnect=true node.passive=true }}"),
+            ]
+        } else {
+            // a mono source; its input `-in` is linked by mship-audio. Passive input: the phone's mic only runs while
+            // the guest records
+            vec![
+                "-n".to_string(), node.clone(), "-c".into(), "1".into(), "-m".into(), "[ MONO ]".into(),
+                "--capture-props".into(), format!("{{ node.name={node}-in node.description=\"{title} {what}\" \
+                                                  node.autoconnect=false node.dont-reconnect=true node.passive=true }}"),
+                "--playback-props".into(), format!("{{ media.class=Audio/Source node.name={node} node.description=\"{title} {what}\" \
+                                                   node.virtual=true priority.session=0 priority.driver=0 }}"),
+            ]
+        };
+        supervise_loopback(vm, args, &runtime, &log)?;
+    }
+    let streams: Vec<&str> = AUDIO_STREAMS.iter().map(|(d, _, _)| *d).collect();
+    vm.helpers.spawn("sound", Command::new(VHOST_SOUND)
+        .args(["--socket", &sock.to_string_lossy(), "--backend", "alsa"])
+        .env("HOME", &home).env("XDG_RUNTIME_DIR", &runtime)
+        .env("MSHIP_SOUND_STREAMS", streams.join(","))
+        .env("MSHIP_SOUND_JACKS", AUDIO_JACKS)
+        // the targets are per stream, in the ALSA configuration
+        .env("PIPEWIRE_PROPS", format!("{{ node.dont-fallback=true node.dont-reconnect=true application.name=\"{title}\" }}"))
+        .env("RUST_LOG", env_or("MSHIP_VM_SOUND_LOG", "warn"))
+        .stdout(log.try_clone().map_err(err)?).stderr(log))?;
+    if !wait_for(&sock, 30) {
+        println!("{}: no sound device (vhost-device-sound did not start)", vm.name);
+        return Ok(vec![]);
+    }
+    let jack = serve_jack_switches(vm, &home.join("jacks"))?;
+    // max-queue-size: the backend takes at most 64 entries a queue (crosvm offers 32768 by default)
+    Ok(vec![
+        "--vhost-user".into(), format!("type=sound,socket={},max-queue-size=64", sock.display()),
+        format!("--input=switches[path={}]", jack.display()),
+    ])
+}
+
+/// The headset jack as input switches (SW_HEADPHONE_INSERT, SW_MICROPHONE_INSERT) of a virtio-input switches device,
+/// as on a phone: the guest's virtio-snd jacks are phantom jacks (ALSA controls, no input device), and Android's wired
+/// accessory handling (and a Linux desktop's) wants the switches. crosvm connects to `<vm dir>/jack.sock`; the state
+/// follows `jacks` (`hp=0|1 mic=0|1`, written by mship-audio).
+fn serve_jack_switches(vm: &Vm, jacks: &Path) -> Res<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::net::UnixListener;
+    const EV_SYN: u16 = 0;
+    const EV_SW: u16 = 5;
+    const SW_HEADPHONE_INSERT: u16 = 2;
+    const SW_MICROPHONE_INSERT: u16 = 4;
+    let path = vm.dir.join("jack.sock");
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).map_err(err)?;
+    let (stop, jacks) = (vm.stop.clone(), jacks.to_path_buf());
+    let read = move || -> (bool, bool) {
+        let s = std::fs::read_to_string(&jacks).unwrap_or_default();
+        (s.contains("hp=1"), s.contains("mic=1"))
+    };
+    let event = |t: u16, c: u16, v: u32| -> [u8; 8] {
+        let mut e = [0u8; 8];
+        e[..2].copy_from_slice(&t.to_le_bytes());
+        e[2..4].copy_from_slice(&c.to_le_bytes());
+        e[4..].copy_from_slice(&v.to_le_bytes());
+        e
+    };
+    std::thread::spawn(move || {
+        // crosvm connects once at start (again after a reconnect); the state is sent on connect and on every change
+        for conn in listener.incoming() {
+            let Ok(mut c) = conn else { continue };
+            let mut sent: Option<(bool, bool)> = None;
+            while !stop.load(Ordering::Relaxed) {
+                let now = read();
+                if sent != Some(now) {
+                    let mut buf = Vec::with_capacity(24);
+                    buf.extend(event(EV_SW, SW_HEADPHONE_INSERT, now.0 as u32));
+                    buf.extend(event(EV_SW, SW_MICROPHONE_INSERT, now.1 as u32));
+                    buf.extend(event(EV_SYN, 0, 0));
+                    if c.write_all(&buf).is_err() {
+                        break;
+                    }
+                    sent = Some(now);
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+    });
+    Ok(path)
+}
+
 /// The host Venus decoder (by name: its /dev/videoN index changes between boots).
 pub fn venus_decoder() -> Option<String> {
     std::fs::read_dir("/sys/class/video4linux").ok()?.flatten().find_map(|v| {

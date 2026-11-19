@@ -1,0 +1,34 @@
+mothershipOS: open the device when the guest prepares a stream and close it at RELEASE, instead of opening it at start
+and keeping it open. With a sound server's ALSA plugin (PipeWire) an open, prepared PCM is a running stream: it kept
+the VM's output (the phone's speaker amplifier) running while the guest was silent. The placeholder in between is
+ALSA "null"; prepare() already reopens the device whenever the stream is not running.
+
+--- a/src/audio_backends/alsa.rs
++++ b/src/audio_backends/alsa.rs
+@@ -575,11 +575,8 @@
+             senders.push(sender);
+         }
+ 
+-        for (i, pcm) in vec.iter_mut().enumerate() {
+-            if let Err(err) = update_pcm(pcm, i, &streams) {
+-                log::warn!("stream {i}: device not available yet: {err}");
+-            }
+-        }
++        // mothershipOS: the device is opened when the guest prepares a stream, not at start: an open, prepared PCM
++        // keeps a sound server's stream (and its output) running while the guest is silent
+ 
+         Self {
+             senders,
+@@ -784,6 +781,12 @@
+         std::mem::take(&mut streams[stream_id as usize].requests);
+         std::mem::take(&mut streams[stream_id as usize].inflight);
+         streams[stream_id as usize].written = 0;
++        let direction = streams[stream_id as usize].direction;
++        drop(streams);
++        // mothershipOS: close the device until the next prepare (it reopens it): see AlsaBackend::new
++        if let Ok(null) = PCM::new("null", direction.into(), false) {
++            *self.pcms[stream_id as usize].lock().unwrap() = null;
++        }
+         Ok(())
+     }
+ 

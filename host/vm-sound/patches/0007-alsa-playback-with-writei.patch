@@ -1,0 +1,85 @@
+mothershipOS: play with snd_pcm_writei (RW access) on the I/O path instead of alsa-lib's mmap emulation, which
+0002 introduced for the DisplayPort dmix. With the PipeWire ALSA plugin (mship.audio: a VM's sound into its
+PipeWire sink) the mmap path took one buffer (~300 ms) and then never saw room again: the guest's writes failed
+("Error writing into ALSA") and the host got silence. writei is what ordinary ALSA clients (aplay) use, and works on
+the dmix as well. A failed write is recovered (snd_pcm_recover) and retried in the next round.
+
+--- a/src/audio_backends/alsa.rs
++++ b/src/audio_backends/alsa.rs
+@@ -134,8 +134,7 @@
+             })?;
+ 
+             hwp.set_access(match s.direction {
+-                Direction::Output => Access::MMapInterleaved,
+-                Direction::Input => Access::RWInterleaved,
++                Direction::Output | Direction::Input => Access::RWInterleaved,
+             })?;
+ 
+             let frame_size = u32::from(s.params.channels)
+@@ -318,35 +317,40 @@
+         }
+     };
+     if avail != 0 {
+-        io.mmap(avail as usize, |buf| {
+-            let stream = &mut streams.write().unwrap()[stream_id];
+-            let Some(request) = stream.requests.front_mut() else {
+-                return 0;
+-            };
+-            if !matches!(stream.state, PCMState::Start) {
++        // snd_pcm_writei: plugin devices (the PipeWire ALSA plugin) keep their ring moving with it; alsa-lib's mmap
++        // emulation took one buffer and then never saw room again
++        let mut lck = streams.write().unwrap();
++        let stream = &mut lck[stream_id];
++        let Some(request) = stream.requests.front_mut() else {
++            return Ok(false);
++        };
++        if !matches!(stream.state, PCMState::Start) {
++            stream.requests.pop_front();
++            return Ok(false);
++        }
++        let room = usize::try_from(p.frames_to_bytes(avail)).unwrap_or_default();
++        let mut buf = vec![0u8; std::cmp::min(room, request.len() - request.pos)];
++        let read_bytes = match request.read_output(&mut buf) {
++            Ok(v) => v as usize,
++            Err(err) => {
++                log::error!("Could not read TX request, dropping it immediately: {err}");
+                 stream.requests.pop_front();
+-                return 0;
++                return Ok(false);
+             }
+-
+-            let n_bytes = std::cmp::min(buf.len(), request.len() - request.pos);
+-            // read_output() always reads (request.len() - request.pos) bytes
+-            let read_bytes = match request.read_output(&mut buf[0..n_bytes]) {
+-                Ok(v) => v,
+-                Err(err) => {
+-                    log::error!("Could not read TX request, dropping it immediately: {err}");
+-                    stream.requests.pop_front();
+-                    return 0;
+-                }
+-            };
+-
+-            request.pos += read_bytes as usize;
+-            if request.pos >= request.len() {
+-                stream.requests.pop_front();
++        };
++        let frames = match io.writei(&buf[..read_bytes]) {
++            Ok(f) => f,
++            Err(err) => {
++                drop(lck);
++                log::trace!("Recovering from {err}");
++                p.recover(err.errno() as std::os::raw::c_int, true)?;
++                return Ok(true);
+             }
+-            p.bytes_to_frames(isize::try_from(read_bytes).unwrap())
+-                .try_into()
+-                .unwrap_or_default()
+-        })?;
++        };
++        request.pos += usize::try_from(p.frames_to_bytes(frames as alsa::pcm::Frames)).unwrap_or_default();
++        if request.pos >= request.len() {
++            stream.requests.pop_front();
++        }
+     } else {
+         return Ok(false);
+     }

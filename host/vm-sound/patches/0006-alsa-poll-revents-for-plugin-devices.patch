@@ -1,0 +1,16 @@
+mothershipOS: after waiting on the PCM's poll descriptors, let alsa-lib translate the events
+(snd_pcm_poll_descriptors_revents). Plugin devices (ioplug: the PipeWire ALSA plugin) update their state in that
+call; without it the stream took one period and then the backend never saw room again: the guest kept playing and
+the host got silence. A hw device or dmix does not need it, which is why the DisplayPort path worked.
+
+--- a/src/audio_backends/alsa.rs
++++ b/src/audio_backends/alsa.rs
+@@ -494,6 +494,8 @@
+                     lck.get()?
+                 };
+                 alsa::poll::poll(&mut fds, 100)?;
++                let lck = pcm.lock().unwrap();
++                let _ = lck.revents(&fds);
+             }
+         }
+     }

@@ -1,0 +1,105 @@
+mothershipOS: complete a playback buffer when the device has played it, not when it is copied into the device. A
+sound card completes a period once it has been played; the backend completed the guest's buffers as soon as they
+were in the device's ring, so every start drained what the guest had prefilled at once and the guest underran one
+period later (Android: start, underrun, stop, prepare, start, ... endlessly: choppy audio). Written requests now wait
+in `inflight` with the device position at their end and complete once frames written minus the device delay pass
+it. The worker keeps running while requests are in flight; STOP and RELEASE return them too.
+
+--- a/src/stream.rs
++++ b/src/stream.rs
+@@ -194,6 +194,11 @@
+     pub channels_max: u8,
+     pub state: PCMState,
+     pub requests: VecDeque<Request>,
++    /// mothershipOS: playback requests written to the device but not played yet, with the device position (frames
++    /// written since prepare) at their end; completed once the device has played past it
++    pub inflight: VecDeque<(Request, u64)>,
++    /// frames written to the device since it was prepared
++    pub written: u64,
+ }
+ 
+ impl Default for Stream {
+@@ -208,6 +213,8 @@
+             channels_max: 6,
+             state: Default::default(),
+             requests: VecDeque::new(),
++            inflight: VecDeque::new(),
++            written: 0,
+         }
+     }
+ }
+--- a/src/audio_backends/alsa.rs
++++ b/src/audio_backends/alsa.rs
+@@ -335,6 +335,17 @@
+             p.avail_update()?
+         }
+     };
++    // mothershipOS: complete the requests the device has played (frames written minus what it still holds), as a
++    // sound card completes a period once it is played; completing them when copied let the guest's buffer run empty
++    {
++        let held = u64::try_from(p.delay().unwrap_or(0)).unwrap_or(0);
++        let mut lck = streams.write().unwrap();
++        let stream = &mut lck[stream_id];
++        let played = stream.written.saturating_sub(held);
++        while stream.inflight.front().is_some_and(|(_, end)| *end <= played) {
++            stream.inflight.pop_front();
++        }
++    }
+     if avail != 0 {
+         // snd_pcm_writei: plugin devices (the PipeWire ALSA plugin) keep their ring moving with it; alsa-lib's mmap
+         // emulation took one buffer and then never saw room again
+@@ -368,8 +379,12 @@
+             }
+         };
+         request.pos += usize::try_from(p.frames_to_bytes(frames as alsa::pcm::Frames)).unwrap_or_default();
++        stream.written += u64::try_from(frames).unwrap_or(0);
+         if request.pos >= request.len() {
+-            stream.requests.pop_front();
++            let end = stream.written;
++            if let Some(done) = stream.requests.pop_front() {
++                stream.inflight.push_back((done, end));
++            }
+         }
+     } else {
+         return Ok(false);
+@@ -466,7 +481,7 @@
+             let has_buffers = || -> bool {
+                 // Hold `streams` lock as short as possible.
+                 let lck = streams.read().unwrap();
+-                !lck[stream_id].requests.is_empty()
++                (!lck[stream_id].requests.is_empty() || !lck[stream_id].inflight.is_empty())
+                     && matches!(lck[stream_id].state, PCMState::Start)
+             };
+             // Run this loop till the stream's buffer vector is empty:
+@@ -517,6 +532,12 @@
+                     }
+                     lck.get()?
+                 };
++                // nothing left to write, only played-back completions to wait for: a short nap (the device is
++                // writable, so polling it would spin)
++                if streams.read().unwrap()[stream_id].requests.is_empty() {
++                    std::thread::sleep(std::time::Duration::from_millis(2));
++                    continue 'empty_buffers;
++                }
+                 alsa::poll::poll(&mut fds, 100)?;
+                 let lck = pcm.lock().unwrap();
+                 let _ = lck.revents(&fds);
+@@ -689,7 +710,8 @@
+             if let Err(err) = st.state.stop() {
+                 log::error!("Stream {id} stop {err}");
+             }
+-            std::mem::take(&mut st.requests)
++            st.written = 0;
++            (std::mem::take(&mut st.requests), std::mem::take(&mut st.inflight))
+         };
+         drop(pending);
+         if let Some(pcm) = self.pcms.get(id as usize) {
+@@ -760,6 +782,8 @@
+         // invalid, we won't be in a valid device state anyway so better to get rid of
+         // them and free the virt queue.
+         std::mem::take(&mut streams[stream_id as usize].requests);
++        std::mem::take(&mut streams[stream_id as usize].inflight);
++        streams[stream_id as usize].written = 0;
+         Ok(())
+     }
+ 

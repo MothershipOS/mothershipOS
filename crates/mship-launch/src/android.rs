@@ -8,6 +8,7 @@
 //!   VIRTUAL_DEVICE_DISPLAY_POWER_MODE_CHANGED: SIGUSR1 off, SIGUSR2 on)
 //! - input: touch, volume keys and power key through mship-inputd, only while lent (handover -> input.ctl)
 //! - battery: goldfish battery fed from mship-battery; usb: crosvm xHCI via crosvm.sock (mship-usb)
+//! - sound (mship.audio): virtio-snd into the VM's PipeWire sink; mship-audio routes it to the speaker while lent
 //! - bluetooth: hvc5 -> mship-bt-bridge; network: taps pxmtap0/pxetap0/pxwtap0/pxwltap0 (mship-vm-net)
 //! - adb: `adb connect vsock:3:5555`; logs: kernel.log (hvc0), logcat.log (hvc2), serial.log (UART)
 
@@ -15,7 +16,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{CROSVM, GPU_LIBS, INPUTD, PRESENTER, Res, Vm, camera_nodes, env_or, err, evdev, follow, log_file, signal, venus_decoder, wait_for};
+use crate::{CROSVM, GPU_LIBS, INPUTD, PRESENTER, Res, Vm, audio_slot, camera_nodes, env_or, err, evdev, follow, log_file, signal, venus_decoder, wait_for};
 
 /// Cuttlefish's own crosvm and gfxstream (the fallback)
 const CF_CROSVM: &str = "/opt/crosvm/bin/crosvm";
@@ -57,6 +58,10 @@ fn hvc(vm: &Vm, n: u32, bt: &str) -> String {
 pub fn run(vm: &Arc<Vm>) -> Res<i32> {
     let d = &vm.dir;
     let p = d.join("pkg");
+    // crosvm appends to its console files: one boot per file, the previous one kept (logcat.log grew to 5 GB)
+    for name in ["kernel", "console", "logcat"] {
+        drop(log_file(d, name)?);
+    }
     for port in STUB_PORTS {
         vsock_stub(*port);
     }
@@ -81,12 +86,15 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
     for f in ["touch.sock", "keys.sock", "input.ctl"] {
         let _ = std::fs::remove_file(d.join(f));
     }
-    let touch = std::env::var("MSHIP_VM_TOUCH").ok().or_else(|| evdev("NT36672C")).unwrap_or_default();
+    let touch = std::env::var("MSHIP_VM_TOUCH").ok().or_else(|| evdev("NT36672C Touchscreen")).unwrap_or_default();
     let keys = std::env::var("MSHIP_VM_KEYS").ok().unwrap_or_else(|| {
         // vol up + assist, vol down
         format!("{},{}", evdev("gpio-keys").unwrap_or_default(), evdev("pm8941_resin").unwrap_or_default())
     });
-    let pwr = std::env::var("MSHIP_VM_POWER").ok().or_else(|| evdev("pm8941_pwrkey")).unwrap_or_default();
+    // power key + the touchscreen's wake gesture (double tap while the panel is off -> KEY_WAKEUP)
+    let pwr = std::env::var("MSHIP_VM_POWER").ok().unwrap_or_else(|| {
+        [evdev("pm8941_pwrkey"), evdev("NT36672C Wake Gesture")].into_iter().flatten().collect::<Vec<_>>().join(",")
+    });
     let log = log_file(d, "inputd")?;
     vm.helpers.spawn("inputd", Command::new(INPUTD).args([&vm.dir_str(), &touch, &keys, &pwr])
         .stdout(log.try_clone().map_err(err)?).stderr(log))?;
@@ -95,6 +103,9 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
     // the display goes to the panel through a DRM lease, never as a sway window
     let _ = std::fs::remove_file(d.join("display.sock"));
     let log = log_file(d, "display")?;
+    // zero copy: the guest's buffers are scanned out directly. Its page flips complete when the frame is on screen
+    // (fenced flushes: guest/drivers/virtio_gpu, crosvm patch 0009, the presenter's frame callbacks), so it never
+    // draws into the frame being scanned out. MSHIP_VM_PRESENT=copy: a GPU copy per frame instead
     let presenter = vm.helpers.spawn("presenter", Command::new(PRESENTER).arg(d.join("display.sock"))
         .stdout(log.try_clone().map_err(err)?).stderr(log))?;
     wait_for(&d.join("display.sock"), 30);
@@ -139,6 +150,7 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
         }
     }
     args.extend(["--socket".into(), format!("{ds}/crosvm.sock")]);
+    args.extend(audio_slot(vm)?);
     args.extend(vm.pool_args());
     for tap in ["tap-name=pxmtap0", "tap-name=pxetap0", "tap-name=pxwtap0", "tap-name=pxwltap0,mac=02:6d:73:00:00:03"] {
         args.extend(["--net".into(), tap.into()]);

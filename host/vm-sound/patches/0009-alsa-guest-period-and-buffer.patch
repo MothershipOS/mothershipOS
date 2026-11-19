@@ -1,0 +1,35 @@
+mothershipOS: size the device's buffer as one guest period (SET_PARAMS period_bytes), in two device periods,
+instead of a fixed ~100 ms period and 2 of them. The backend completes a guest buffer as soon as it is copied into
+the device, so the device buffer is how far ahead of real time it takes the guest's audio. With 200 ms (the
+PipeWire ALSA plugin grants it; the DisplayPort dmix capped it lower) it completed the guest's whole buffer at
+every start; with two guest periods it still took everything Android prefills: either way the guest underran one
+period after each start, stopped, prepared and started again, endlessly (choppy audio). One period ahead is safe.
+
+--- a/src/audio_backends/alsa.rs
++++ b/src/audio_backends/alsa.rs
+@@ -176,7 +176,12 @@
+ 
+             // Calculate period size for ~100ms (arbitrary) interrupt period:
+ 
+-            let period_bytes = bps_rate / 10;
++            // mothershipOS: half the guest's period (its SET_PARAMS; ~100 ms only if it gave none), the device buffer
++            // two of them: the host runs at most one guest period ahead of real time
++            let period_bytes = match u32::from(s.params.period_bytes) {
++                0 => bps_rate / 10,
++                b => b / 2,
++            };
+ 
+             // Finally, calculate the size of a period (in frames):
+ 
+@@ -195,8 +200,9 @@
+             // > as well as the parameters set in the snd_pcm_hardware structure (in the driver).
+             //
+             // So, if the operation fails let's assume the ALSA runtime has set a better value.
+-            if let Err(err) = hwp.set_buffer_size_near(2 * i64::from(period_frames)) {
+-                log::error!("could not set buffer size {}: {}", 2 * period_frames, err);
++            let buffer_frames = 2 * period_frames;
++            if let Err(err) = hwp.set_buffer_size_near(i64::from(buffer_frames)) {
++                log::error!("could not set buffer size {}: {}", buffer_frames, err);
+             }
+ 
+             // Read more at https://www.alsa-project.org/wiki/FramesPeriods.
