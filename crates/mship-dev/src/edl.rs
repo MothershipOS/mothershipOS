@@ -302,7 +302,9 @@ impl Firehose<'_> {
         let (mut hdr, t) = (vec![], Instant::now());
         while t.elapsed() < Duration::from_secs(8) {
             hdr.extend(self.0.read(0x2000, Duration::from_millis(500))?);
-            if hdr.windows(15).any(|w| w == b"rawmode=\"true\"") {
+            // The firehose ACKs with `<response value="ACK" rawmode="true" />`, sometimes split
+            // across reads and preceded by an INFO log packet. Match the substring length-agnostically.
+            if hdr.windows(14).any(|w| w == b"rawmode=\"true\"") {
                 return Ok(());
             }
         }

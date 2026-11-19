@@ -4,5 +4,7 @@ After=network.target systemd-networkd.service
 Wants=network.target
 
 [Service]
-Type=oneshot
+# exec, not oneshot: the boot (and mothershipd after multi-user.target) must not wait for the network; the clock is
+# already restored from the RTC offset
+Type=exec
 ExecStart=/usr/local/sbin/mship-system timesync

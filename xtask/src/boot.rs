@@ -4,9 +4,11 @@
 //!   arm64 defconfig trimmed to Qualcomm plus the nio fragment (configs/nio-host.config, every request checked),
 //!   built in the toolchain of the running kernel (xtask/docker/host-kernel: Ubuntu 24.04, gcc 13.3, so existing
 //!   modules stay valid): target/host-kernel/build/arch/arm64/boot/Image and the modules (target/host-kernel/modroot,
-//!   with motorola_nio/kernel/drivers in extra/)
+//!   zstd-compressed, with the EXTERNAL_MODULES in extra/)
 //! - `initramfs`: /init = mship-init (static), busybox for the RAM host's shells, early firmware
-//!   (motorola_nio/boot/initramfs.json): target/boot/initramfs.cpio.gz
+//!   (motorola_nio/boot/initramfs.json) and the kernel's modules: target/boot/initramfs.cpio.gz. The modules travel
+//!   with the kernel in the FIT; mship-init mounts them on the root's /usr/lib/modules/<release> (nothing on the
+//!   root disk to go stale)
 //! - `fit`: the FIT for boot_b (motorola_nio/boot/nio-el2.its: host kernel + nio-el2-display.dts + initramfs),
 //!   target/boot/nio-el2.itb; written to the phone with `mship-system boot-image <itb>`
 //! - `abl-dtb [--diagnostic] [--dtbo <stock dtbo image>]`: the ABL-path board DTB (motorola_nio/kernel/dts) compiled and
@@ -90,6 +92,11 @@ pub struct Kernel {
     pub modroot: PathBuf,
 }
 
+/// The external (not in-tree) modules built with the kernel, by name: each `<name>.c` (headers `<name>*.h`) in
+/// motorola_nio/kernel/drivers. Only these: a file there is not built just because it exists (work in progress
+/// lives in kernel/wip). Our own drivers belong in the kernel as patches (kernel/patches, Kconfig, config fragment).
+const EXTERNAL_MODULES: &[&str] = &["v4l2loopback"];
+
 pub fn host_kernel() -> Result<Kernel> {
     let work = target_dir().join("host-kernel");
     std::fs::create_dir_all(&work)?;
@@ -136,20 +143,21 @@ pub fn host_kernel() -> Result<Kernel> {
     let modroot = work.join("modroot");
     let _ = std::fs::remove_dir_all(&modroot);
     kmake(&["INSTALL_MOD_PATH=/k/modroot", "INSTALL_MOD_STRIP=1", "modules_install"])?;
-    // our out-of-tree drivers (motorola_nio/kernel/drivers/*.c, headers beside them), one module each, into the
-    // release's extra/
+    // the external modules (EXTERNAL_MODULES, from motorola_nio/kernel/drivers), one module each, into extra/
     let ext = work.join("ext");
     let _ = std::fs::remove_dir_all(&ext);
     std::fs::create_dir_all(&ext)?;
     let mut kbuild = String::new();
-    for e in std::fs::read_dir(port().join("kernel/drivers"))?.flatten() {
-        let p = e.path();
-        if p.extension().is_some_and(|x| x == "c" || x == "h") {
-            std::fs::copy(&p, ext.join(p.file_name().unwrap()))?;
+    let drivers = port().join("kernel/drivers");
+    for m in EXTERNAL_MODULES {
+        for e in std::fs::read_dir(&drivers)?.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with(m) && (name.ends_with(".c") || name.ends_with(".h")) {
+                std::fs::copy(e.path(), ext.join(&name))?;
+            }
         }
-        if p.extension().is_some_and(|x| x == "c") {
-            kbuild += &format!("obj-m += {}.o\n", p.file_stem().unwrap().to_string_lossy());
-        }
+        ensure!(ext.join(format!("{m}.c")).exists(), "{m}.c: not in {}", drivers.display());
+        kbuild += &format!("obj-m += {m}.o\n");
     }
     std::fs::write(ext.join("Kbuild"), kbuild)?;
     kmake(&["M=/k/ext", "-j", &jobs(), "modules"])?;
@@ -158,7 +166,7 @@ pub fn host_kernel() -> Result<Kernel> {
     let manifest = serde_json::json!({
         "linux": host_source()?,
         "patches": patches(&port().join("kernel/patches"))?.iter()
-            .map(|p| Ok(serde_json::json!({"path": p.strip_prefix(root())?.to_string_lossy(), "sha256": sha256(p)?})))
+            .map(|p| Ok(serde_json::json!({"path": p.strip_prefix(root().parent().unwrap())?.to_string_lossy(), "sha256": sha256(p)?})))
             .collect::<Result<Vec<_>>>()?,
         "image_sha256": sha256(&image)?,
         "config_sha256": sha256(&config)?,
@@ -266,7 +274,10 @@ pub fn busybox_binary() -> Result<PathBuf> {
     Ok(out)
 }
 
-pub fn initramfs() -> Result<PathBuf> {
+/// The initramfs: mship-init, busybox, early firmware and the kernel's modules (`modroot`, from host_kernel: the
+/// same build as the kernel in the FIT, so the two always match; mship-init mounts them on the root's
+/// /lib/modules/<release>).
+pub fn initramfs(modroot: &Path) -> Result<PathBuf> {
     let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(port().join("boot/initramfs.json"))?)?;
     let work = target_dir().join("boot");
     std::fs::create_dir_all(&work)?;
@@ -286,7 +297,9 @@ pub fn initramfs() -> Result<PathBuf> {
         let data = match (f["url"].as_str(), f["local"].as_str()) {
             (Some(url), _) => std::fs::read(fetch(url, sum, &work.join("firmware").join(path))?)?,
             (None, Some(local)) => {
-                let p = root().join(local);
+                // initramfs.json `local` paths are repo-prefixed (e.g. motorola_nio/firmware/…),
+                // relative to the directory that holds mothershipOS and the port side by side
+                let p = root().parent().unwrap().join(local);
                 let d = std::fs::read(&p).with_context(|| format!("{}: the phone's firmware (motorola_nio/firmware, not in git)", p.display()))?;
                 ensure!(sha256_hex(&d) == sum, "{}: SHA-256 differs from initramfs.json", p.display());
                 d
@@ -303,6 +316,7 @@ pub fn initramfs() -> Result<PathBuf> {
         }
         c.file(path, 0o644, &data);
     }
+    modules(&mut c, modroot)?;
     let out = work.join("initramfs.cpio.gz");
     let mut gz = flate2::write::GzEncoder::new(std::fs::File::create(&out)?, flate2::Compression::best());
     gz.write_all(&c.finish())?;
@@ -311,12 +325,41 @@ pub fn initramfs() -> Result<PathBuf> {
     Ok(out)
 }
 
+/// lib/modules/<release> from a modules_install tree (files and directories; the `build` link is not shipped).
+fn modules(c: &mut Cpio, modroot: &Path) -> Result<()> {
+    let base = modroot.join("lib/modules");
+    let mut releases = std::fs::read_dir(&base)?.flatten().map(|e| e.path()).collect::<Vec<_>>();
+    ensure!(releases.len() == 1, "{}: one kernel release expected, found {}", base.display(), releases.len());
+    let release = releases.pop().unwrap();
+    fn walk(c: &mut Cpio, root: &Path, dir: &Path) -> Result<()> {
+        let mut entries = std::fs::read_dir(dir)?.flatten().collect::<Vec<_>>();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let p = e.path();
+            let name = p.strip_prefix(root)?.to_string_lossy().into_owned();
+            let t = e.file_type()?;
+            if t.is_dir() {
+                c.dir(&name);
+                walk(c, root, &p)?;
+            } else if t.is_file() {
+                c.file(&name, 0o644, &std::fs::read(&p)?);
+            }
+        }
+        Ok(())
+    }
+    for d in ["lib", "lib/modules"] {
+        c.dir(d);
+    }
+    c.dir(&release.strip_prefix(modroot)?.to_string_lossy());
+    walk(c, modroot, &release)
+}
+
 // ---------------------------------------------------------------- FIT
 
 pub fn fit() -> Result<PathBuf> {
     let kernel = host_kernel()?;
     println!("modules for this kernel: {}", kernel.modroot.display());
-    let initramfs = initramfs()?;
+    let initramfs = initramfs(&kernel.modroot)?;
     let work = target_dir().join("boot");
     let stage = work.join("fit");
     let _ = std::fs::remove_dir_all(&stage);

@@ -129,9 +129,16 @@ pub fn patches(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Apply patches to a tree (`git apply`, which also works outside a repository).
+///
+/// The tree lives under `target/` (gitignored) inside the mothershipOS repository, so from within it
+/// `git apply` discovers that enclosing repo. It then silently skips creating files on ignored paths
+/// (new-file hunks) while still exiting 0 — a patch that only adds files appears to apply but does not.
+/// `GIT_CEILING_DIRECTORIES` stops repo discovery above the tree, so `git apply` runs tree-local (its
+/// intended "outside a repository" mode) and honours new-file hunks.
 pub fn apply(tree: &Path, patches: &[PathBuf]) -> Result<()> {
+    let ceiling = tree.parent().unwrap_or(tree);
     for p in patches {
-        let st = Command::new("git").arg("apply").arg(p).current_dir(tree).status()?;
+        let st = Command::new("git").arg("apply").arg(p).current_dir(tree).env("GIT_CEILING_DIRECTORIES", ceiling).status()?;
         ensure!(st.success(), "{}: does not apply", p.display());
     }
     Ok(())

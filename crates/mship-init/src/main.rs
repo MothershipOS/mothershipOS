@@ -4,7 +4,9 @@
 //!    ACM serial shell) with telnet on :2323 (busybox: the shells of the RAM host)
 //! 2. the persistent root: the partition named mship-root, mounted read-only, with a boot counter
 //!    (/var/lib/mship-boot/attempts, reset by mship-boot-ok.service): after 3 unfinished boots, or with `mship.ram`
-//!    on the command line, the phone stays in this RAM host. Otherwise switch_root to systemd.
+//!    on the command line, the phone stays in this RAM host. Otherwise switch_root to systemd, with the kernel's
+//!    modules (shipped in this initramfs, built with the kernel) on a tmpfs at the root's /usr/lib/modules/<release>:
+//!    whatever the root disk has there is never used, so kernel and modules always match.
 //! 3. the RAM host: a root shell on the serial console (uart12), after a KVM report
 //!
 //! Not as PID 1 (the RAM host's diagnostics, formerly nio-diag): `mship-init kvm` (KVM API and VM creation),
@@ -195,6 +197,40 @@ fn free_initramfs(dir: &Path, dev: u64) {
     }
 }
 
+fn kernel_release() -> String {
+    let mut u: libc::utsname = unsafe { std::mem::zeroed() };
+    unsafe { libc::uname(&mut u) };
+    unsafe { std::ffi::CStr::from_ptr(u.release.as_ptr()) }.to_string_lossy().into_owned()
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    for e in fs::read_dir(from)?.flatten() {
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        let t = e.file_type()?;
+        if t.is_dir() {
+            fs::create_dir_all(&dst)?;
+            copy_tree(&src, &dst)?;
+        } else if t.is_file() {
+            fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+/// The kernel's modules from this initramfs onto a tmpfs at the new root's /usr/lib/modules/<release> (its
+/// directory created while the root is still writable).
+fn modules(release: &str) -> Result<(), String> {
+    let from = Path::new("/lib/modules").join(release);
+    if !from.is_dir() {
+        return Err(format!("no {}", from.display()));
+    }
+    let to = Path::new(NEWROOT).join("usr/lib/modules").join(release);
+    let to_s = to.to_string_lossy().into_owned();
+    mount("mship-modules", &to_s, "tmpfs", libc::MS_NOSUID | libc::MS_NODEV, Some("mode=0755")).map_err(|e| format!("tmpfs on {to_s}: {e}"))?;
+    copy_tree(&from, &to).map_err(|e| format!("copy to {to_s}: {e}"))?;
+    mount("none", &to_s, "", libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV, None).map_err(|e| format!("read-only {to_s}: {e}"))
+}
+
 /// Switch to mship-root unless disabled or failing; returns only if the phone stays in the RAM host.
 fn try_root(helpers: &[i32]) {
     if fs::read_to_string("/proc/cmdline").is_ok_and(|c| c.split_whitespace().any(|w| w == "mship.ram")) {
@@ -220,8 +256,14 @@ fn try_root(helpers: &[i32]) {
     }
     let _ = fs::create_dir_all(attempts.parent().unwrap());
     let _ = write(&attempts, &format!("{}\n", n + 1));
+    let release = kernel_release();
+    let _ = fs::create_dir_all(Path::new(NEWROOT).join("usr/lib/modules").join(&release));
     unsafe { libc::sync() };
     let _ = mount("none", NEWROOT, "", libc::MS_REMOUNT | libc::MS_RDONLY, None);
+    match modules(&release) {
+        Ok(()) => log(&format!("MODULES {release} (from the boot image)")),
+        Err(e) => log(&format!("MODULES_FAIL {release}: {e}")),
+    }
     log(&format!("ROOT_SWITCH /dev/{d} attempt={}", n + 1));
     // the USB serial and the telnet port go to the new root's services
     for p in helpers {

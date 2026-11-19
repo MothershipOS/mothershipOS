@@ -13,7 +13,7 @@ const PACKAGES: &[&str] = &[
     // network
     "network-manager", "wpasupplicant", "iw", "wireless-regdb", "rfkill", "dnsmasq-base", "iptables",
     // audio
-    "alsa-utils", "alsa-ucm-conf", "pipewire", "pipewire-pulse", "wireplumber", "libspa-0.2-bluetooth",
+    "alsa-utils", "alsa-ucm-conf", "pipewire", "pipewire-alsa", "pipewire-pulse", "wireplumber", "libspa-0.2-bluetooth",
 ];
 const USER: &str = "mship";
 const GROUPS: &str = "video,render,input,audio";

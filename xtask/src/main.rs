@@ -28,6 +28,7 @@ pub const TARGET: &str = "aarch64-unknown-linux-gnu";
 const PROGRAMS: &[(&str, &str)] = &[
     ("mothershipd", "usr/local/sbin"),
     ("mship-system", "usr/local/sbin"),
+    ("mship-audio", "usr/local/sbin"),
     ("mship-battery", "usr/local/sbin"),
     ("mship-bt-bridge", "usr/local/sbin"),
     ("mship-camera", "usr/local/sbin"),
@@ -39,6 +40,7 @@ const PROGRAMS: &[(&str, &str)] = &[
     ("mship-launch", "usr/local/bin"),
     ("mship-presenter", "usr/local/bin"),
     ("mship-inputd", "usr/local/bin"),
+    ("fpc-test", "usr/local/bin"),
 ];
 
 /// gfxstream shims (cdylib crate, file name in Cuttlefish's crosvm directory)
@@ -125,7 +127,7 @@ fn main() -> Result<()> {
         "check" => check(),
         "gpu" => gpu::gpu().map(|_| ()),
         "host-kernel" => boot::host_kernel().map(|_| ()),
-        "initramfs" => boot::initramfs().map(|_| ()),
+        "initramfs" => boot::host_kernel().and_then(|k| boot::initramfs(&k.modroot)).map(|_| ()),
         "fit" => boot::fit().map(|_| ()),
         "abl-dtb" => boot::abl_dtb(&std::env::args().skip(2).collect::<Vec<_>>()).map(|_| ()),
         "sway" => host::sway().map(|_| ()),
@@ -133,7 +135,7 @@ fn main() -> Result<()> {
         "dist" => dist(),
         "" | "help" => {
             println!(
-                "cargo xtask <task>\n  check         clippy (warnings are errors) and the tests\n  gpu           the phone's VMM: crosvm, virglrenderer, minigbm\n  host-kernel   the phone's kernel and modules\n  initramfs     the phone's initramfs (mship-init, busybox, early firmware)\n  fit           the boot image for boot_b (kernel + DTB + initramfs)\n  abl-dtb [--diagnostic] [--dtbo <img>]  the ABL-path board DTB, checked\n  sway          sway-mship and its wlroots\n  vhost-sound   the VMs' sound backend\n  dist          build for the phone and pack the release tarball (target/dist)"
+                "cargo xtask <task>\n  check         clippy (warnings are errors) and the tests\n  gpu           the phone's VMM: crosvm, virglrenderer, minigbm\n  host-kernel   the phone's kernel and modules\n  initramfs     the phone's initramfs (mship-init, busybox, early firmware, the kernel's modules)\n  fit           the boot image for boot_b (kernel + DTB + initramfs)\n  abl-dtb [--diagnostic] [--dtbo <img>]  the ABL-path board DTB, checked\n  sway          sway-mship and its wlroots\n  vhost-sound   the VMs' sound backend\n  dist          build for the phone and pack the release tarball (target/dist)"
             );
             Ok(())
         }

@@ -3,7 +3,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{Res, set_clock};
 
@@ -30,11 +30,13 @@ pub fn parse_http_date(s: &str) -> Option<i64> {
     Some(days * 86400 + hh * 3600 + mm * 60 + ss)
 }
 
-/// The server's Date, asked directly or through an HTTP proxy ("host:port").
+/// The server's Date, asked directly or through an HTTP proxy ("host:port"). IPv4 addresses first: a phone often has
+/// only link-local or ULA IPv6, and every IPv6 connect then waits out its timeout.
 fn date(proxy: Option<&str>) -> Option<i64> {
     let target = proxy.map_or(format!("{URL_HOST}:80"), String::from);
-    let addr = target.to_socket_addrs().ok()?.next()?;
-    let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).ok()?;
+    let mut addrs: Vec<_> = target.to_socket_addrs().ok()?.collect();
+    addrs.sort_by_key(|a| a.is_ipv6());
+    let mut s = addrs.iter().find_map(|a| TcpStream::connect_timeout(a, Duration::from_secs(3)).ok())?;
     s.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     let path = if proxy.is_some() { format!("http://{URL_HOST}{URL_PATH}") } else { URL_PATH.into() };
     write!(s, "HEAD {path} HTTP/1.0\r\nHost: {URL_HOST}\r\nUser-Agent: mothershipOS\r\n\r\n").ok()?;
@@ -49,7 +51,9 @@ fn date(proxy: Option<&str>) -> Option<i64> {
 pub fn sync() -> Res<()> {
     let proxy = std::env::var("MSHIP_PROXY").unwrap_or_else(|_| "10.42.0.1:3128".into());
     let proxy = proxy.trim_start_matches("http://").trim_end_matches('/').to_string();
-    for _ in 0..30 {
+    // the clock is already restored from the RTC offset at boot: this only corrects it, so give up after a while
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
         for (via, p) in [("direct", None), ("proxy", Some(proxy.as_str()))] {
             if let Some(t) = date(p) {
                 set_clock(t)?;
