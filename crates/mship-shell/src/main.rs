@@ -1,7 +1,8 @@
 //! mship-shell: the mothershipOS shell, the host's touch UI (GTK 4 + libadwaita); runs as user mship in the sway
 //! session.
 //!
-//! Home: host status, virtual machines (start / show / sleep / stop), terminal, settings, power off / restart.
+//! Home: host status, virtual machines (start / show / sleep / stop), the VM store ([`store`]: search, install,
+//! update), terminal, settings, power off / restart.
 //! Resources: live CPU (per core), memory, GPU, battery power, network, storage, per-VM and top processes.
 //! Settings: battery, Wi-Fi, Bluetooth, SSH, CPU modes, region & time, display, hardware owners, VM memory,
 //! about, the raw power votes. Everything goes through mothershipd ([`broker`]); the on-screen keyboard (wvkbd)
@@ -9,6 +10,7 @@
 
 mod broker;
 mod settings;
+mod store;
 mod system;
 mod terminal;
 mod ui;
@@ -18,7 +20,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gdk, glib};
-use mship_core::api::{HandoverState, Op, PowerState, ShowResult, Topic, VmInfo, VmList, VoteState};
+use mship_core::api::{HandoverState, Op, PowerState, ShowResult, StoreStatus, Topic, VmInfo, VmList, VoteState};
 use mship_core::status::{BatteryStatus, HostStatus, RegionStatus};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -47,6 +49,10 @@ pub const HW: &[(&str, &str, &str)] = &[
     ("display-ext", "External display (USB-C)", "video-joined-displays-symbolic"),
     ("cellular", "Mobile network (SIM, calls, data)", "network-cellular-symbolic"),
     ("cameras", "Cameras", "camera-photo-symbolic"),
+    ("speaker", "Speaker", "audio-speakers-symbolic"),
+    ("earpiece", "Earpiece", "call-start-symbolic"),
+    ("headset", "Headset (3.5 mm jack)", "audio-headset-symbolic"),
+    ("microphone", "Microphones", "audio-input-microphone-symbolic"),
 ];
 /// lent while the VM is shown; the rest while it runs
 pub const HW_SCREEN: &[&str] = &["display", "buttons"];
@@ -92,6 +98,7 @@ struct Home {
     cpu: adw::ActionRow,
     ssh: adw::ActionRow,
     res: adw::ActionRow,
+    shop: adw::ActionRow,
     vms: Rows,
 }
 
@@ -236,10 +243,13 @@ impl Shell {
         let vms = Rows::new(group("Virtual machines", "The assist key or holding both volume buttons returns to mothershipOS"));
 
         let g_apps = group("Apps", "");
+        let shop = row("VM store", "find, install and update VMs", Some("system-software-install-symbolic"), true);
+        shop.connect_activated(nav_to(store::store_page));
         let term = row("Terminal", "host shell (foot)", Some("utilities-terminal-symbolic"), true);
         term.connect_activated(|_| terminal::open());
         let sett = row("Settings", "Wi-Fi, SSH, CPU, display, hardware", Some("emblem-system-symbolic"), true);
         sett.connect_activated(nav_to(settings::settings_page));
+        g_apps.add(&shop);
         g_apps.add(&term);
         g_apps.add(&sett);
 
@@ -267,7 +277,7 @@ impl Shell {
         p.toolbar.set_content(None::<&gtk::Widget>);
         bx.append(&p.prefs);
         p.toolbar.set_content(Some(&bx));
-        *self.home.borrow_mut() = Some(Home { clock, date, batt, wifi, cpu, ssh, res, vms });
+        *self.home.borrow_mut() = Some(Home { clock, date, batt, wifi, cpu, ssh, res, shop, vms });
         p.page
     }
 
@@ -289,6 +299,18 @@ impl Shell {
             s.ask(if reboot { Op::Reboot } else { Op::PowerOff }, |_| {});
         });
         dlg.present(Some(&self.win));
+    }
+
+    /// The home screen's store line: updates of the installed VMs (mothershipd checks the store).
+    fn tick_store(self: &Rc<Self>) {
+        let me = Rc::downgrade(self);
+        self.broker.get(Op::StoreStatus, move |r: Result<StoreStatus, String>| {
+            if let (Ok(st), Some(s)) = (r, me.upgrade())
+                && let Some(h) = s.home.borrow().as_ref()
+            {
+                h.shop.set_subtitle(&esc(&store::summary(&st)));
+            }
+        });
     }
 
     fn tick_clock(&self) {
@@ -525,6 +547,7 @@ fn activate(app: &adw::Application) {
         if !s.broker.connected() {
             return glib::ControlFlow::Continue;
         }
+        s.tick_store();
         let me = Rc::downgrade(&s);
         s.broker.get(Op::RegionStatus, move |r: Result<RegionStatus, String>| {
             if let (Ok(r), Some(s)) = (r, me.upgrade()) {
@@ -532,6 +555,12 @@ fn activate(app: &adw::Application) {
             }
         });
         glib::ControlFlow::Break
+    });
+    let me = Rc::downgrade(&sh);
+    glib::timeout_add_seconds_local(60, move || {
+        let Some(s) = me.upgrade() else { return glib::ControlFlow::Break };
+        s.tick_store();
+        glib::ControlFlow::Continue
     });
     let me = Rc::downgrade(&sh);
     glib::timeout_add_seconds_local(4, move || {

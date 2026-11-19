@@ -16,6 +16,13 @@ mship-system vm-install <repository | package> [--name <id>]
   the VM cannot be built on the phone (PixelOS needs an AOSP tree and an x86 PC): its repository builds the archive
   and publishes it, e.g. as a release asset.
 
+A [VM store](https://github.com/MothershipOS/vmstore) hosts packages for download, one folder per VM
+(`<id>/package.tar.xz`, `info.txt`, an icon); its page shows each VM's `vm-install` command. The shell's VM store
+(Home › VM store) lists one, by default mothershipOS's own, https://vmstore.buzz-ltd.com (another in the page's
+Store row): search, install, and updates (mothershipd checks the store every 6 hours; an installed VM whose version
+differs from the store's has one). A store's package may
+also be a VM repository's source as an archive (with its `mothership-build`): it is built on the phone like a clone.
+
 Running it again with a newer repository or package updates the installed VM; the user's data stays (see `keep`).
 
 ## The package
@@ -32,6 +39,7 @@ A directory (or an archive of one) with:
 ```json
 {
   "id": "pixelos",
+  "version": "16.0.0",
   "keep": ["disk.img"],
   "install": "pixelos-install"
 }
@@ -40,6 +48,7 @@ A directory (or an archive of one) with:
 | Key | What |
 |---|---|
 | `id` | the VM's directory on the phone, `/var/lib/mothership/vms/<id>` (lowercase letters, digits, `-`; `--name` overrides it) |
+| `version` | the package's version: shown on the phone, and compared with a store's to offer updates (the store's `info.txt` should carry the same; the VM repositories' release tasks write it there) |
 | `keep` | paths an update leaves as they are when the VM already has them: the user's disk, a used seed. Everything else the package has replaces the installed copy; files the package does not have (logs, runtime state) stay |
 | `install` | optional: a program in the package that finishes the install in the VM's directory: `<install> install` the first time, `<install> update` after an update (PixelOS: makes the disk from its images, or writes the new images into an installed disk keeping the user's data) |
 
@@ -54,7 +63,11 @@ needs from the network it downloads itself; what needs a PC (a kernel, packages)
 releases.
 
 ## Rules
-- The package's paths stay inside it (no `/`, no `..`).
+- The package's paths stay inside it (no `/`, no `..`): `keep`, `install`, and vm.json's `boot.*` and `log` (a file
+  name).
+- Only regular files and directories are installed: a package with a symlink is refused, one with a device node,
+  FIFO or socket is refused before anything runs, setuid and setgid bits are removed.
+- A package gets no root: its build and its install step run as the session user, like the VM itself.
 - The VM must be stopped to update it.
 - Nothing of the VM's is installed outside its directory.
 - A VM runs on the phone through the contracts only (`docs/contracts/`): no phone drivers in it. Guest-side

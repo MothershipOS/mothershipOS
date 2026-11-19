@@ -14,6 +14,7 @@ mod pool;
 mod power;
 mod screen;
 mod session;
+mod store;
 mod vms;
 
 use std::sync::{Arc, Condvar, Mutex};
@@ -97,6 +98,7 @@ impl Daemon {
     fn run(self: Arc<Self>) {
         let me = self.clone();
         std::thread::Builder::new().name("api".into()).spawn(move || me.api_loop()).unwrap();
+        store::watch(); // updates of the installed VMs
         // boot: the saved charge limit (the battery driver starts at 100 %), CPU mode and brightness
         std::thread::spawn(|| {
             if let Err(e) = hpower::battery_apply() {

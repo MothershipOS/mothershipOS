@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::Daemon;
 use crate::hub::Client;
-use crate::{screen, session};
+use crate::{screen, session, store};
 
 fn peer_uid(s: &UnixStream) -> Option<u32> {
     use std::os::fd::AsRawFd;
@@ -153,6 +153,10 @@ impl Daemon {
             Op::BtConnect { mac } => host(bt::connect(&mac, true)),
             Op::BtDisconnect { mac } => host(bt::connect(&mac, false)),
             Op::BtRemove { mac } => host(bt::remove(&mac)),
+            Op::StoreList => ok(store::list()),
+            Op::StoreStatus => ok(store::status()),
+            Op::StoreSet { url } => host(store::set_url(&url)),
+            Op::StoreInstall { vm } => host(store::install(&vm)),
             Op::PowerOff | Op::Reboot => {
                 let reboot = matches!(op, Op::Reboot);
                 let me = self.clone();

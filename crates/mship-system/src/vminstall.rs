@@ -11,6 +11,10 @@
 //! keeps (its `keep` list: the user's disk, a used seed) stay as they are and the rest is replaced. Last, the
 //! package's install step runs in the VM's directory (`<install> install`, or `<install> update`). The VM must be
 //! stopped.
+//!
+//! A package is not trusted with root: its steps run as the session user; what it unpacks may hold only files,
+//! directories and symlinks (no devices, no setuid), and only regular files and directories go into the VM's
+//! directory; vm.json's paths stay inside it (manifest::load).
 
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -97,7 +101,7 @@ fn obtain(source: &str, work: &Path) -> Res<PathBuf> {
             a
         };
         std::fs::create_dir_all(&src).map_err(|e| e.to_string())?;
-        run("tar", &["-xSf", &archive.to_string_lossy(), "-C", &src.to_string_lossy()])?;
+        run("tar", &["-xSf", &archive.to_string_lossy(), "-C", &src.to_string_lossy(), "--no-same-owner", "--no-same-permissions"])?;
     } else {
         let (uid, gid) = user()?;
         let st = Command::new("git").args(["clone", "-q", "--depth", "1", source, &src.to_string_lossy()]).uid(uid).gid(gid)
@@ -106,6 +110,7 @@ fn obtain(source: &str, work: &Path) -> Res<PathBuf> {
             return Err(format!("git clone {source} failed"));
         }
     }
+    sanitize(&src)?;
     // an archive of one top directory: that directory
     let top: Vec<PathBuf> = std::fs::read_dir(&src).map_err(|e| e.to_string())?.flatten().map(|e| e.path()).collect();
     if let [only] = top.as_slice()
@@ -141,7 +146,29 @@ fn running(dir: &Path) -> bool {
         .is_some_and(|p| unsafe { libc::kill(p, 0) } == 0)
 }
 
-/// Move the package's files into the VM's directory; what `keep` names stays where the VM already has it.
+/// What a source brought: files, directories, symlinks; no device nodes, FIFOs or sockets (refused), no setuid or
+/// setgid bits (removed). Before anything of it is handed to the session user.
+fn sanitize(dir: &Path) -> Res<()> {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    for e in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?.flatten() {
+        let p = e.path();
+        let m = std::fs::symlink_metadata(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let t = m.file_type();
+        if t.is_block_device() || t.is_char_device() || t.is_fifo() || t.is_socket() {
+            return Err(format!("{}: a device, FIFO or socket in the package", p.display()));
+        }
+        if t.is_dir() {
+            sanitize(&p)?;
+        } else if t.is_file() && m.permissions().mode() & 0o6000 != 0 {
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(m.permissions().mode() & 0o1777))
+                .map_err(|e| format!("{}: {e}", p.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Move the package's files into the VM's directory; what `keep` names stays where the VM already has it. Only
+/// regular files and directories: a symlink (out of the VM's directory, onto a disk of the phone) is refused.
 fn merge(from: &Path, to: &Path, keep: &[String], rel: &Path) -> Res<()> {
     for e in std::fs::read_dir(from.join(rel)).map_err(|e| e.to_string())?.flatten() {
         let r = rel.join(e.file_name());
@@ -151,9 +178,15 @@ fn merge(from: &Path, to: &Path, keep: &[String], rel: &Path) -> Res<()> {
             println!("kept {rs}");
             continue;
         }
-        if e.path().is_dir() {
+        let t = std::fs::symlink_metadata(e.path()).map_err(|e| e.to_string())?.file_type();
+        if std::fs::symlink_metadata(&dst).is_ok_and(|m| m.file_type().is_symlink()) {
+            std::fs::remove_file(&dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+        }
+        if t.is_dir() {
             std::fs::create_dir_all(&dst).map_err(|e| format!("{}: {e}", dst.display()))?;
             merge(from, to, keep, &r)?;
+        } else if !t.is_file() {
+            return Err(format!("{rs}: not a regular file or directory (a package installs no symlinks)"));
         } else if std::fs::rename(e.path(), &dst).is_err() {
             std::fs::copy(e.path(), &dst).map_err(|e| format!("{}: {e}", dst.display()))?;
         }
@@ -196,6 +229,10 @@ fn install_in(source: &str, name: Option<&str>, work: &Path) -> Res<()> {
     if running(&to) {
         return Err(format!("{id} is running; stop it first"));
     }
+    // the session user owns the VMs: never install as root through a link it planted
+    if std::fs::symlink_metadata(&to).is_ok_and(|m| !m.is_dir()) {
+        return Err(format!("{}: not a directory", to.display()));
+    }
     let update = to.join("vm.json").exists();
     std::fs::create_dir_all(&to).map_err(|e| format!("{}: {e}", to.display()))?;
     merge(&dir, &to, if update { &pkg.keep } else { &[] }, Path::new(""))?;
@@ -235,6 +272,28 @@ pub fn install(source: &str, name: Option<&str>) -> Res<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_package_brings_no_links_devices_or_setuid() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = std::env::temp_dir().join(format!("vminstall-safe-{}", std::process::id()));
+        let (from, to) = (t.join("from"), t.join("to"));
+        std::fs::create_dir_all(from.join("sub")).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        std::fs::write(from.join("tool"), "x").unwrap();
+        std::fs::set_permissions(from.join("tool"), std::fs::Permissions::from_mode(0o4755)).unwrap();
+        sanitize(&from).unwrap();
+        assert_eq!(std::fs::metadata(from.join("tool")).unwrap().permissions().mode() & 0o7777, 0o755);
+        // a symlink out of the VM's directory is refused
+        std::os::unix::fs::symlink("/etc", from.join("sub/etc")).unwrap();
+        assert!(merge(&from, &to, &[], Path::new("")).is_err());
+        assert!(!to.join("sub/etc").exists());
+        // a FIFO is refused before anything else happens
+        let fifo = std::ffi::CString::new(from.join("pipe").to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        assert!(sanitize(&from).is_err());
+        let _ = std::fs::remove_dir_all(&t);
+    }
 
     #[test]
     fn ids_and_paths() {

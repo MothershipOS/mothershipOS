@@ -31,7 +31,7 @@ pub enum Topic {
 pub const TOPICS: &[Topic] = &[Topic::Power, Topic::Vms, Topic::Handover, Topic::Host, Topic::Cpu];
 
 /// Hardware a VM can be given (Settings › Hardware).
-pub const ITEMS: &[&str] = &["display", "buttons", "wifi-2g", "wifi-5g", "internet", "bluetooth", "usb", "display-ext", "cellular", "cameras"];
+pub const ITEMS: &[&str] = &["display", "buttons", "wifi-2g", "wifi-5g", "internet", "bluetooth", "usb", "display-ext", "cellular", "cameras", "speaker", "earpiece", "headset", "microphone"];
 /// lent while the VM is shown; the rest while it runs
 pub const SCREEN_ITEMS: &[&str] = &["display", "buttons"];
 
@@ -179,6 +179,20 @@ pub enum Op {
     BtDisconnect { mac: String },
     #[serde(rename = "bt.remove")]
     BtRemove { mac: String },
+    // the VM store (a vmstore server): its VMs, installing one from it
+    /// the store's VMs (fetched now; their icons cached on the phone)
+    #[serde(rename = "store.list")]
+    StoreList,
+    /// installs in progress, installed versions (cheap: no network)
+    #[serde(rename = "store.status")]
+    StoreStatus,
+    /// the store's address (http(s)://host[:port])
+    #[serde(rename = "store.set")]
+    StoreSet { url: String },
+    /// download a VM from the store and install it (or update it): `mship-system vm-install`; `vm` is its store id
+    /// (not `id`: that is the request's)
+    #[serde(rename = "store.install")]
+    StoreInstall { vm: String },
     /// stop every running VM cleanly, then power off / reboot the phone
     #[serde(rename = "system.poweroff")]
     PowerOff,
@@ -335,6 +349,60 @@ pub struct VmList {
     pub vms: Vec<VmInfo>,
 }
 
+// ---------------------------------------------------------------- the VM store
+/// One VM of the store (its index.json).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoreVm {
+    /// its folder in the store, and the VM's directory on the phone
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub summary: String,
+    pub description: String,
+    /// the package's size in bytes
+    pub size: u64,
+    /// its icon, cached on the phone (a file the shell can read)
+    pub icon: Option<String>,
+}
+
+/// `store.list`
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StoreList {
+    pub url: String,
+    pub vms: Vec<StoreVm>,
+    /// why the store could not be read
+    pub error: Option<String>,
+}
+
+/// An install from the store.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StoreJob {
+    /// "downloading" | "installing" | "failed"
+    pub phase: String,
+    /// bytes downloaded of `total`
+    pub done: u64,
+    pub total: u64,
+    /// the installer's last line, or why it failed
+    pub detail: String,
+}
+
+/// `store.status`
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoreStatus {
+    pub url: String,
+    pub jobs: BTreeMap<String, StoreJob>,
+    /// installed VMs by id: their version (their package's, or the store's they came from; "" if unknown)
+    pub installed: BTreeMap<String, String>,
+    /// the store's version of each VM, as of the last check
+    pub available: BTreeMap<String, String>,
+    /// installed VMs whose store version differs from theirs
+    pub updates: Vec<String>,
+    /// when the store was last read (Unix time; 0: not yet)
+    pub checked: u64,
+}
+
 /// Topic `handover`: who holds each item now ("host" | a VM directory), and who it is assigned to ("host" | a VM
 /// name).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -372,5 +440,14 @@ mod tests {
         let m: Message = serde_json::from_str(r#"{"id": 4, "ok": false, "error": "no"}"#).unwrap();
         assert!(matches!(m, Message::Reply(Reply { ok: false, .. })));
         assert!(serde_json::from_str::<Request>(r#"{"id": 1, "op": "nope"}"#).is_err());
+    }
+
+    #[test]
+    fn op_fields_do_not_collide_with_the_request() {
+        // an op's field named like the request's ("id", "op") would be lost in the flattened request
+        for op in [Op::StoreInstall { vm: "pixelos".into() }, Op::StoreSet { url: "https://example.org".into() }, Op::VmStart { vm: "x".into() }] {
+            let r = Request { id: 7, op: op.clone() };
+            assert_eq!(serde_json::from_str::<Request>(&serde_json::to_string(&r).unwrap()).unwrap(), r);
+        }
     }
 }
