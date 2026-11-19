@@ -36,10 +36,10 @@ guest reads the same values from the controller.
 
 **History:** 1.0 (2026.1) initial.
 
-**Implementation:** host `host/bt-bridge/` (`mship-bt-bridge.service`): an `HCI_CHANNEL_USER` socket on
+**Implementation:** host `mship-bt-bridge` (`crates/mship-devices/src/bin/bt.rs`, `mship-bt-bridge.service`): an `HCI_CHANNEL_USER` socket on
 `hci0` while attached, the guest's stream on `/run/mothership/bt/<vm>.sock` (crosvm `unix-stream` serial),
 control socket `/run/mothership/bt-bridge.sock` (`attach <vm>`, `detach <vm> [reason]`, `status`) used by
-`mship-handover` (hardware item `bluetooth`, lent while the VM runs). Tested 2026-10-18 on the nio with PixelOS
+mothershipd (hardware item `bluetooth`, lent while the VM runs). Tested 2026-10-18 on the nio with PixelOS
 (QCA6390 over UART): Android turns Bluetooth on with the phone's address and discovers nearby devices.
 Release gives BlueZ the controller back, powered; re-attach brings Android's Bluetooth back on without user
 action.

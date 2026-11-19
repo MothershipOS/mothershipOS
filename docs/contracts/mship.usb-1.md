@@ -32,22 +32,23 @@ dynamic, not part of the caps.
 
 **History:** 1.0 (2026.1) initial.
 
-**Implementation:** host `host/usb/` (`mship-usb.service`): device list from sysfs, uevents plus a 5 s
+**Implementation:** host `mship-usb` (`crates/mship-devices/src/bin/usb.rs`, `mship-usb.service`): device list from sysfs, uevents plus a 5 s
 rescan, `crosvm usb attach/detach` on the VM's control socket (`<vm dir>/crosvm.sock`; the service opens
 the usbdevfs node as root, and crosvm gets the fd), `USBDEVFS_RESET` and `drivers_probe` to give devices
 back, control socket `/run/mothership/usb.sock` (`attach <vm>`, `detach <vm> [reason]`, `status`), the owner
 kept in `/run/mothership/usb-owner` and attachments recovered from `crosvm usb list` after a service
-restart. `mship-handover` item `usb` (lent while the VM runs). Android: the guest fstab lets vold mount
+restart. mothershipd item `usb` (lent while the VM runs). Android: the guest fstab lets vold mount
 USB disks (`pixelOS_16_VM/patches/device/google/cuttlefish/0001-fstab-vold-usb-disks.patch`).
-Tested 2026-10-18 on the nio with PixelOS, using `motorola_nio/archive/prototypes/usb/usb-test-device.sh` (dummy_hcd + a mass-storage
+Tested 2026-10-18 on the nio with PixelOS, using a dummy_hcd test device ([`usb-test-device.sh`](https://github.com/MothershipOS/motorola_nio/blob/main/archive/prototypes/usb/usb-test-device.sh): dummy_hcd + a mass-storage
 gadget, so the dev link stays up): the guest's `usb-storage` binds and Android mounts the FAT disk as a
 public volume, unplug and re-plug while lent re-attach automatically, release and VM stop give the disk back to
 the host with its data, the next VM start gets it again, and a service restart neither duplicates nor loses
 attachments.
 
 **Gaps (fix before 2026.1):**
-- The nio's USB-C port is dual role since 2026-10-18 (TCPM, dwc3 role switch, VBUS out; `motorola_nio/docs/usb.md`),
-  but host mode hasn't been tested with a real device or dock yet.
+- Open / unverified: the nio's USB-C port is dual role (TCPM, dwc3 role switch, VBUS out;
+  `motorola_nio/docs/usb.md`) and the Ubuntu desktop VM takes a monitor's or dock's keyboard and mouse through this
+  handle, but the passthrough test above used dummy_hcd only.
 - Per-device assignment (one device to one VM, another to another) is not in 1.0: the whole group moves.
 - Isochronous devices (webcams, USB audio) are untested through crosvm's passthrough.
 - The VM's crosvm control socket is created by the launcher, not allocated by a broker.

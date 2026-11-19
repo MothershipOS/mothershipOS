@@ -1,7 +1,7 @@
 # mothershipOS
 
 **A host OS for phones that runs other operating systems as virtual machines.** Linux runs at EL2 with KVM, owns the
-phone's hardware, and runs full guest OSes (Android, desktop Ubuntu, Ubuntu Touch) as VMs under crosvm. Hardware is
+phone's hardware, and runs full guest OSes (Android, desktop Linux) as VMs under crosvm. Hardware is
 lent to a VM while it runs: the screen, touch, buttons, GPU, Wi-Fi, Bluetooth, modem, cameras, USB.
 
 mothershipOS is the layer **between the hardware and the VMs**. It defines one set of interfaces (contracts) that
@@ -9,7 +9,7 @@ every phone implements and every VM uses, so a VM image is built once and runs o
 is supported once and runs every VM.
 
 ```
-   VMs           Android (PixelOS)   ·   Ubuntu desktop   ·   Ubuntu Touch   ·   …        generic images, no phone drivers
+   VMs           Android (PixelOS)   ·   Ubuntu desktop   ·   …                           generic images, no phone drivers
                  ─────────────────────── contracts (mship.*) ───────────────────────
    mothershipOS  KVM host · crosvm · hardware broker · display presenter · power · shell  the same on every phone
                  ─────────────────────── ports connect here ───────────────────────
@@ -21,25 +21,26 @@ is supported once and runs every VM.
 | Part | What it holds | Repositories |
 |---|---|---|
 | **mothershipOS** (this) | the host OS and the contracts: `crates/`, `host/`, `dist/`, `docs/` | `mothershipOS/` |
-| **Ports** | one phone each: kernel config and patches, device tree, boot chain, firmware manifests, its rootfs files, bring-up notes and history | `motorola_nio/` (Motorola nio) |
+| **Ports** | one phone each: kernel config and patches, device tree, boot chain, firmware manifests, its rootfs files, bring-up notes | `motorola_nio/` (Motorola nio) |
 | **VMs** | one distributable guest each: its manifest, its build, its package; mothershipOS installs it on the phone ([VM packages](docs/vm-packages.md)) | `pixelOS_16_VM/`, `ubuntu_26.04_desktop_VM/` |
 
 mothershipOS builds no VM: `mship-system vm-install <repository | package>` installs one on the phone, building it
-there from its repository or unpacking a prebuilt package. mothershipOS's build (`cargo xtask`) finds the port next
+there from its repository or unpacking a prebuilt package, e.g. from a [VM store](https://github.com/MothershipOS/vmstore).
+mothershipOS's build (`cargo xtask`) finds the port next
 to it.
 
 **A new phone** connects its hardware to the mothership: write a port that gives mothershipOS a Linux at EL2 with KVM
 and drivers for its hardware, and it can run every VM. **A new VM** uses the contracts and runs on every port.
 
-## Status (2026-10-27)
+## Status
 First port: **Motorola nio** (moto g100 / edge s, XT2125-4, Qualcomm SM8250 / Snapdragon 870).
 - Boot: u-boot as the hypervisor (EL2) → Linux 6.18 at EL2 with KVM, Ubuntu 26.04 root on UFS.
 - Android 16 (PixelOS, Cuttlefish arm64) and Ubuntu 26.04 desktop as VMs at the same time: GPU through virtio-gpu
-  native context (Mesa freedreno/turnip), the panel by DRM lease with zero-copy scanout, hardware video decode,
-  native Wi-Fi per band, Bluetooth, battery, USB, modem (LTE; telephony in progress), all five cameras (V4L2 in the
-  guests), a shared pool of CPUs and RAM.
-- Not yet: GPS service (the engine works on the host), audio for VMs, release 2026.1 (open gaps in
-  [docs/compat.md](docs/compat.md)).
+  native context (Mesa freedreno/turnip), displays by DRM lease with zero-copy scanout, hardware video decode,
+  native Wi-Fi per band, Bluetooth, battery, USB, modem (LTE data, SMS, call signalling), the phone's speaker,
+  earpiece, headset and mics, the cameras (V4L2 in the guests), system power votes, a shared pool of CPUs and RAM.
+- Not yet: call audio, GPS service (the engine works on the host), sensors, fingerprint for VMs, release 2026.1
+  (open gaps in [docs/compat.md](docs/compat.md) and each contract).
 
 ## If you are trying to…
 - **run a Linux desktop, or a second Android, on your phone as a VM** — that is what this is.
@@ -77,8 +78,8 @@ project is a working reference. Prefer its contracts over device-specific shortc
 | `guest/` | the guest side of the contracts, as source the VMs build in: guest drivers (`mship_wifi`, `virtio_media`, VA-API) ([guest/README](guest/README.md)) |
 | `tests/` | contract and manifest compatibility fixtures |
 
-Next to it: [`../motorola_nio/`](https://github.com/MothershipOS/motorola_nio/blob/main/README.md) (the Motorola nio port, with the bring-up history and
-prototypes in `archive/`), and the VMs [`../pixelOS_16_VM/`](https://github.com/MothershipOS/pixelOS_16_VM/blob/main/README.md) (Android 16)
+Next to it: [`../motorola_nio/`](https://github.com/MothershipOS/motorola_nio/blob/main/README.md) (the Motorola nio port; reference tools in `archive/`:
+prototypes, QHEE analysis), and the VMs [`../pixelOS_16_VM/`](https://github.com/MothershipOS/pixelOS_16_VM/blob/main/README.md) (Android 16)
 and [`../ubuntu_26.04_desktop_VM/`](https://github.com/MothershipOS/ubuntu_26.04_desktop_VM/blob/main/README.md) (Ubuntu 26.04 desktop).
 
 Not tracked: kernel sources and build outputs, firmware blobs, boot images. Proprietary firmware is listed by

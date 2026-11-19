@@ -1,4 +1,4 @@
-# Hardware handles: design (V1 draft, 2026-10-12)
+# Hardware handles
 
 **Goal:** VM images are generic and get distributed. mothershipOS is built per phone and updated over time. A VM
 gets real hardware by attaching to **handles** that mothershipOS publishes. A VM built for an older mothershipOS
@@ -23,8 +23,8 @@ registers or firmware.
 | **Slot** | The virtual device a VM boots with for a class (virtio-gpu scanout, virtio-input, a vsock channel…). It always exists. Without a handle attached it is **empty**: no events, no carrier, panel off, radio off |
 | **Contract** | A versioned interface between mothershipOS and VMs (§3). Everything a VM depends on is a contract; everything else is a host implementation detail |
 | **VM package** | What gets distributed: disk images + kernel/initrd + a **manifest**. **No host code**: launchers, presenters and bridges belong to mothershipOS |
-| **Platform** | A host-implemented recipe that turns a manifest into a running VMM (`cuttlefish-arm64`, `linux-virt-arm64`). Versioned like a contract |
-| **Broker** | `mothershipd` (root). Owns all handles, enforces policy, attaches and detaches handles, launches VMs from manifests |
+| **Platform** | A host-implemented recipe that turns a manifest into a running VMM (`cuttlefish-arm64`, `efi-virt-arm64`). Versioned like a contract |
+| **Broker** | `mothershipd` (root). Owns all handles, enforces policy, attaches and detaches handles, launches VMs from manifests (§6) |
 
 ## 2. Attach model
 - **Attach / detach** connects a handle's backend to a VM's slot, or disconnects it. Live and idempotent.
@@ -34,11 +34,13 @@ registers or firmware.
   network uplink, battery state) have many users.
 - **Revocation is mandatory:** the broker takes a handle back instantly, without the VM's cooperation (DRM lease
   revoke, `EVIOCREVOKE`/grab, tc redirect removal, broker-held fds for interfaces without revoke).
-- **Policy per VM** (manifest + user settings): `when_shown` handles move with the screen (assist key, volume
-  combo, Show); `while_running` handles stay until taken back explicitly or the VM stops.
+- **Assignment:** every group has one assigned owner, mothershipOS or one VM (Settings › Hardware,
+  `/var/lib/mothership/config/hardware.json`). Assigned groups are lent automatically: `display` and `buttons`
+  while the VM is shown (they move with the screen: assist key, volume combo, Show), every other group while it
+  runs, until taken back explicitly or the VM stops.
 - **Groups** are what the user lends: `display` (display + display-power + touch + power key = "the screen"),
   `buttons` (volume keys), `wifi-2g`, `wifi-5g` (one Wi-Fi band each, native control), `internet` (shared
-  internet through the host's uplink), `bluetooth` (the controller at the HCI level), `usb` (the devices plugged into the phone), `cellular` (the modem: SIM, calls, SMS, mobile data), `cameras` (every camera), `display-ext` (the USB-C
+  internet through the host's uplink), `bluetooth` (the controller at the HCI level), `usb` (the devices plugged into the phone), `cellular` (the modem: SIM, calls, SMS, mobile data), `cameras` (every camera), `speaker` (the built-in speaker), `earpiece` (the earpiece), `headset` (the 3.5 mm jack), `microphone` (the built-in mics), `display-ext` (the USB-C
   external display: leased to the VM, never used by mothershipOS, which stays on the panel). A VM may hold any set of groups; two VMs never hold the same group.
 - **Wi-Fi bands are separate handles** when the radio can run two station interfaces on two channels at once
   (nl80211 interface combination with ≥2 managed and `#channels` ≥ 2; the nio's QCA6390 can). mothershipOS
@@ -48,8 +50,8 @@ registers or firmware.
 
 ## 2a. Lifecycle and release
 Every handle attachment goes through: `empty → attached → releasing → empty`.
-- **Release reasons:** `user` (taken back in the UI or with `mship-hw`), `screen` (assist key, volume combo,
-  Show of another VM: only `when_shown` groups), `stop` (VM stopped or crashed), `revoked` (policy, e.g. the
+- **Release reasons:** `user` (taken back in the UI or with `mship handover take`), `screen` (assist key, volume combo,
+  Show of another VM: only `display` and `buttons`), `stop` (VM stopped or crashed), `revoked` (policy, e.g. the
   host needs its last uplink), `gone` (hardware disappeared).
 - **Release is immediate and unconditional.** The VM's cooperation is never awaited. Channel contracts get a
   best-effort `detached {reason}` message, which is a notice, not a request.
@@ -73,12 +75,15 @@ Every handle attachment goes through: `empty → attached → releasing → empt
 | bluetooth | controller reset; a guest HAL waiting for its `HCI_Reset` gets it answered, otherwise a Hardware Error event restarts the guest's stack | host sends `HCI_Reset` (every link ends) and takes the controller back; the guest gets a Hardware Error event | controller back to BlueZ, which restores its power state |
 | usb | every present device (reset first), later ones on arrival | every device detached (an unplug; pending transfers fail) | devices reset, host drivers bind again |
 | cameras | a camera runs while the guest streams from it | frames stop, a black frame; streams stay open and empty | cameras off |
+| speaker, earpiece | the guest's sound plays on that output at once | silence at once; streams keep running in real time | host sounds only |
+| microphone | the guest records the mics at once | the guest records silence; its streams keep running | the mics are the host's |
+| headset | the guest's headset streams reach the jack's devices; jacks report the plug state | silence; jacks report unplugged | the headset is the host's |
 | cellular | the guest's radio stack reconnects and initializes the modem; data calls on request | calls hung up, the guest's data calls ended, its AT channel closed (radio unavailable) | the host's own mobile data |
 | gpu | shared: no attach/release; contexts end with the VM | — | — |
 | battery | shared, read-only: no attach/release; every running VM sees the live host values | — | — |
 
 ## 2b. Handle descriptor
-What the broker publishes (`list-handles`, broker API 1):
+What the broker is to publish (`list-handles`; not implemented yet, §6):
 ```jsonc
 {
   "id": "wifi:5g",                   // <class>:<name>; names are generic (panel0, 2g, 5g), never phone part names
@@ -109,6 +114,10 @@ Handles on the nio:
 | `battery:0` | mship.battery | — (shared, read-only) | present, technology Li-ion, charge_full_design_uah 5000000 |
 | `camera:all` | mship.camera | cameras | cameras: back (OV64B), back 2 (ultrawide OV16A10), front (OV16A1Q), front 2 (S5K4H7); 1280x720 each |
 | `modem:0` | mship.modem | cellular | at 3gpp-27.007, data ipv4, slots 2, voice signalling (SDX55) |
+| `audio:speaker` | mship.audio | speaker | AW882xx with SKT speaker protection |
+| `audio:earpiece` | mship.audio | earpiece | WCD9380 EAR output |
+| `audio:headset` | mship.audio | headset | 3.5 mm jack: headphones, headset mic, plug state |
+| `audio:mic` | mship.audio | microphone | the built-in mics (main and back) |
 | `gpu:0` | mship.gpu | — (shared) | context_types [drm, cross-domain, virgl, gfxstream-gles, gfxstream-composer] |
 
 A slot binds every attached handle with the same contract and a version that satisfies it. One slot can be fed
@@ -123,7 +132,7 @@ slot holding both band handles shows one interface with both bands.
 | **Manifest schema** (`vm.json`) | VM package ↔ mothershipOS | yes: every schema from 1 on is readable forever |
 | **Slot contracts** (`mship.<class>`) | guest ↔ mothershipOS | yes: support window below |
 | **Platforms** (`cuttlefish-arm64`, `efi-virt-arm64`) | guest image ↔ mothershipOS VMM setup | yes: same window as slots |
-| Broker API (`mship-hw`, socket) | host clients (shell, CLI) ↔ broker | host-internal, ships together. Versioned (`api`), no long window |
+| Broker API (`/run/mothership/mothershipd.sock`, CLI `mship`) | host clients (shell, CLI, device services) ↔ broker | host-internal, ships together, no long window |
 | Backend internals, install paths, VMM flags | — | **not** contracts, free to change |
 
 ### Version numbers
@@ -183,18 +192,19 @@ slot holding both band handles shows one interface with both bands.
 ```
 - Paths are relative to the VM directory. Unknown fields are kept and ignored (forward compatibility).
 - A slot contract is the **guest's view** (e.g. `mship.display` 1.0 = one virtio-gpu scanout with the panel's
-  mode). How the host presents it (a DRM lease for PixelOS, a compositor window for a QEMU guest) is host
+  mode). How the host presents it (a DRM lease of the panel for PixelOS, of the external display for the Ubuntu desktop) is host
   policy, never part of the manifest. Slots may carry `params` within what the contract defines (e.g.
   `mship.gpu` `context_types`).
 - Host resources such as the vsock CID, taps and sockets are allocated by the broker, not declared.
-- `handover` is the user's checklist. The UI edits it, and the broker owns the file (atomic writes,
-  `schema` preserved).
+- `handover` (the groups a VM gets, by `when_shown` / `while_running`) is still validated, but the running
+  system assigns hardware in Settings › Hardware (§2) and does not read it. Open: drop it from schema 2 or use it
+  as the default assignment of a new VM.
 - `schema` is required. A file with a newer schema than the host knows is refused with "needs mothershipOS
   ≥ `min_mothership`". Older schemas (from schema 2 on) are migrated in memory by pure functions and written
   back in their own schema, so the VM stays usable on the release it was made for.
 - Handover groups the host doesn't know (from a newer release) are kept in the file and ignored.
 
-## 5. Slot contracts at 1.0 (what exists today) and planned
+## 5. Slot contracts at 1.0 and planned
 
 | Contract | Slot (guest view) | Host side (bridged level) | Revocation | Status |
 |---|---|---|---|---|
@@ -203,38 +213,40 @@ slot holding both band handles shows one interface with both bands.
 | `mship.touch` 1.0 | virtio-input multitouch, caps = panel size | evdev events (grab) | grab release | ✅ |
 | `mship.keys` 1.0 | virtio-input keyboard: VOLUMEUP/DOWN, POWER, WAKEUP | evdev events | grab / stop forwarding | ✅ |
 | `mship.net-shared` 1.0 | virtio-net on a tap, DHCP | NAT out of the uplink | forwarding closed | ✅ (as group `internet`) |
-| `mship.gpu` | virtio-gpu context types | DRM native context (msm) + cross-domain gralloc; gfxstream fallback | context teardown | ✅ native context (2026-10-13) |
-| `mship.wifi` 1.0 | `mship_wifi` cfg80211 driver (nl80211 station subset over a channel) + virtio-net data | one band-restricted station interface per handle; frames via tc redirect | deauth, keys deleted, redirect removed | V1, not implemented |
-| `mship.audio` | virtio-snd | ALSA PCM via vhost-user-snd | broker-held PCM | planned |
-| `mship.power` (draft) | shared `system_power` channel; each running VM requests a profile and sleep permission | broker aggregation + host power backend | invalidate this attachment; a still-running VM remains an awake participant | [planning only](contracts/mship.power-1.draft.md), not registered |
-| `mship.bt` 1.0 | H4 HCI over a virtio-console port (Cuttlefish `hvc5`, the stock HAL) | `HCI_CHANNEL_USER` socket on the controller | `HCI_Reset`, socket closed, Hardware Error event to the guest | ✅ [V1](contracts/mship.bt-1.md) (2026-10-18), gaps listed |
-| `mship.battery` 1.0 | goldfish battery → guest power_supply `battery` + `ac` (read-only, every VM) | kernel power_supply → `mship-battery` → crosvm power monitor | — (shared) | ✅ [V1](contracts/mship.battery-1.md) (2026-10-18), gaps listed |
+| `mship.gpu` | virtio-gpu context types | DRM native context (msm) + cross-domain gralloc; gfxstream fallback | context teardown | ✅ native context |
+| `mship.wifi` 1.0 | `mship_wifi` cfg80211 driver (nl80211 station subset over a channel) + virtio-net data | one band-restricted station interface per handle; frames via tc redirect | deauth, keys deleted, redirect removed | ✅ [V1](contracts/mship.wifi-1.md) in PixelOS, gaps listed |
+| `mship.audio` 1.0 | virtio-snd, one PCM per phone device (speaker, earpiece, headset, mics) + headset jack: the guest routes natively | per-device PipeWire nodes of the VM, linked to the phone's devices while lent (speaker protection stays on the host) | device link removed, silence; jack unplugged | 🚧 [V1](contracts/mship.audio-1.md) in PixelOS, gaps listed |
+| `mship.power` 1.0 | vsock channel (port 7720): each running VM votes its state, sleep permission and clock floors | mothershipd's power table: CPU/GPU floors, VM freeze, phone suspend | the VM's vote dropped; a running VM without a vote blocks sleep | ✅ [host side](contracts/mship.power-1.md); not registered, no guest adapter (host-built votes) |
+| `mship.bt` 1.0 | H4 HCI over a virtio-console port (Cuttlefish `hvc5`, the stock HAL) | `HCI_CHANNEL_USER` socket on the controller | `HCI_Reset`, socket closed, Hardware Error event to the guest | ✅ [V1](contracts/mship.bt-1.md), gaps listed |
+| `mship.battery` 1.0 | goldfish battery → guest power_supply `battery` + `ac` (read-only, every VM) | kernel power_supply → `mship-battery` → crosvm power monitor | — (shared) | ✅ [V1](contracts/mship.battery-1.md), gaps listed |
 | `mship.backlight`, `mship.vibrator` | channel / virtio-input FF | backlight / FF evdev | — | planned |
-| `mship.usb` 1.0 | virtual xHCI, one root port per device | usbdevfs fds (opened by the host) → crosvm USB passthrough | detach + device reset | ✅ [V1](contracts/mship.usb-1.md) (2026-10-18), tested with dummy_hcd; nio host mode not brought up |
-| `mship.modem` 1.0 | AT channel (cuttlefish-arm64: vsock 9600, the stock RIL) + eth0 for data calls | WWAN AT port; data calls as QMI sessions routed to the VM's NIC | calls hung up, data calls ended, channel closed | 🚧 in progress: host side runs, [V1 draft](contracts/mship.modem-1.md); guest untested (see its status) |
-| `mship.camera` 1.0 | V4L2 capture devices (virtio-media), one per camera, XR24 | libcamera (software ISP on the GPU) → v4l2loopback | frames stop, black frame | 🚧 [V1](contracts/mship.camera-1.md) (2026-10-27): Linux guests stream (V4L2, PipeWire); Android lists the cameras, capture unverified |
+| `mship.usb` 1.0 | virtual xHCI, one root port per device | usbdevfs fds (opened by the host) → crosvm USB passthrough | detach + device reset | ✅ [V1](contracts/mship.usb-1.md), gaps listed |
+| `mship.modem` 1.0 | AT channel (cuttlefish-arm64: vsock 9600, the stock RIL) + eth0 for data calls | WWAN AT port; data calls as QMI sessions routed to the VM's NIC | calls hung up, data calls ended, channel closed | ✅ [V1](contracts/mship.modem-1.md) in PixelOS (registration, data, SMS, call signalling); no call audio, gaps listed |
+| `mship.camera` 1.0 | V4L2 capture devices (virtio-media), one per camera, XR24 | libcamera (software ISP on the GPU) → v4l2loopback | frames stop, black frame | 🚧 [V1](contracts/mship.camera-1.md): Linux guests stream (V4L2, PipeWire); Android lists the cameras, capture unverified |
 | `mship.sensors`, `mship.gnss` | channels | IIO / QMI LOC (modem) | held fds | later; GNSS engine runs on the host ([nio](https://github.com/MothershipOS/motorola_nio/blob/main/docs/gnss.md)) |
 
-Platforms 1.0:
-- `cuttlefish-arm64`: direct kernel boot, Cuttlefish virtual hardware (18 virtio consoles with the Cuttlefish
-  layout, vsock, gfxstream GPU, 3 NICs, the bootconfig keys the host sets). Runs under crosvm.
-- `efi-virt-arm64`: UEFI boot of a disk image on an arm64 `virt` machine with virtio-blk/net/gpu-gl/input
-  (Ubuntu Touch). Runs under QEMU today.
-Each platform has a document (`docs/platforms/<id>-<major>.md`) listing exactly what the guest can rely on; each
-contract has one in `docs/contracts/`. The VMM
-that implements it is a host detail and may change.
+Platforms 1.0 (both run under crosvm):
+- [`cuttlefish-arm64`](platforms/cuttlefish-arm64-1.md): direct kernel boot, Cuttlefish virtual hardware (18
+  virtio consoles with the Cuttlefish layout, vsock, virtio-gpu, 4 NICs, the bootconfig keys). PixelOS.
+- [`efi-virt-arm64`](platforms/efi-virt-arm64-1.md): a desktop Linux from a disk image with its own kernel
+  (virtio-blk/net/gpu, xHCI). The Ubuntu desktop.
+Each platform document lists exactly what the guest can rely on; each contract has one in
+[`contracts/`](contracts/README.md). The VMM that implements it is a host detail and may change.
 
 ## 6. Broker (`mothershipd`)
-- Root service, socket `/run/mothership/broker.sock` (group `mship`), JSON lines. The first message is
-  `hello {client, api}`. CLI: `mship-hw`.
-- Requests: `list-handles`, `list-vms`, `start <vm>`, `stop <vm>`, `attach <handle|group> <vm>`,
-  `detach <handle|group>`, `show <vm>` (when_shown set), `take-screen` (screen switch), `watch` (event stream:
-  attached, detached, vm-started, vm-stopped, caps-changed, handle-gone).
-- State in `/run/mothership/broker/` (owners, running VMs). Ownership is rebuilt at start; VMs that are not
-  running own nothing.
-- Backends per class implement `attach(vm, slot)`, `detach()`, `revoke()`, `caps()`. Today's helpers become
-  backends: the sway lease and presenter (display), `mship-vm-inputd` (touch/keys), `mship-admin` NAT (net-shared).
-- `mship-handover` stays as a compatibility CLI on top of the broker until the shell and inputd talk to it directly.
+- Root service, socket `/run/mothership/mothershipd.sock` (root and group `mship`), one JSON object per line:
+  requests `{"id", "op", …}`, replies `{"id", "ok", "result" | "error"}`, events `{"event", "data"}` to
+  subscribers (topics `power`, `vms`, `handover`, `host`, `cpu`). Types: `crates/mship-core/src/api.rs`. CLI:
+  `mship` (`crates/mship`).
+- Ops by area: `vm.*` (list, start, stop, show, sleep, wake), `handover.*` (status, assign, give, take, release,
+  screen), `power.*` (`mship.power`), plus the host's own settings (Wi-Fi, Bluetooth, SSH, CPU, region, screen,
+  battery, VM store).
+- Each device class is a device service with a control socket (`attach <vm> [handle]`, `detach <vm> [reason]`,
+  `status`): `mship-wifi-bridge`, `mship-bt-bridge`, `mship-usb`, `mship-modem`, `mship-camera`, `mship-audio`.
+  Display goes through sway's DRM lease and the VM's presenter, touch and keys through the VM's `mship-inputd`,
+  `internet` through the host's NAT rules.
+- Not implemented yet: the handle registry with descriptors and caps (§2b, `list-handles`), broker-allocated
+  vsock CIDs and sockets (they come from `vm.json` and the launcher today).
 
 ## 7. Performance rules
 1. Data planes are zero copy or in-kernel (dmabuf frames, vhost-net/tc packets, vhost-user queues). The broker
@@ -244,18 +256,9 @@ that implements it is a host detail and may change.
 4. Every class gets a benchmark against native: frame rate, input-to-photon, audio round trip, iperf,
    scan/connect time.
 
-## 8. Order
-1. Versioning core: contract registry, manifest schema 1, compat fixtures and tests, `VERSION`,
-   `docs/compat.md`. V1 manifests for PixelOS and Ubuntu Touch (deployed together with the broker).
-2. Broker skeleton: handle registry, ownership, socket API, `mship-hw`. Port display, touch, keys and
-   net-shared from `mship-handover` as backends; `mship-handover` becomes a client.
-3. Generic launch: platforms `cuttlefish-arm64` and `efi-virt-arm64` replace the per-VM launcher scripts.
-4. `mship.wifi` (native Wi-Fi), then audio, backlight/vibrator. (GPU native context, Bluetooth, battery: done.)
-
-## 9. Open decisions
-- System-power participation: [draft `mship.power` contract](contracts/mship.power-1.draft.md). Follow the
-  existing slot/version/attachment model; decide shared-control bookkeeping, wire format, guest readiness,
-  and wake behavior before implementation. Keep `mship.display-power` independent.
+## 8. Open decisions
+- `mship.power` registration and its manifest slot, sleep preparation and timed wakes
+  ([mship.power, Open](contracts/mship.power-1.md#open-not-in-10)). Keep `mship.display-power` independent.
 - Support window length (proposed: ≥4 releases and ≥12 months).
 - Release cadence and naming (`YYYY.N` proposed).
 - Whether VM packages may be signed and the broker verifies them (not needed yet; the manifest leaves room

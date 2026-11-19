@@ -68,8 +68,9 @@ The bands listed are those the host could ever attach to this slot (fixed for th
 **History:** 1.0 (2026.1) initial.
 
 **Implementation:** guest `guest/drivers/mship_wifi/` (built for the Android GKI 6.12.38-android16-5 and loaded
-from the first-stage ramdisk by `cargo xtask android-initrd`), host `crates/mship-devices` (`mship-wifi-bridge`,
-`mship-wifi-bridge.service`). Tested 2026-10-13 on the nio with PixelOS: scan shows only the attached band, WPA2-PSK
+from the first-stage ramdisk, `pixelOS_16_VM`'s `cargo xtask android-initrd`), host `crates/mship-devices`
+(`mship-wifi-bridge`, `mship-wifi-bridge.service`); bands are lent by mothershipd (hardware items `wifi-2g`,
+`wifi-5g`). Tested 2026-10-13 on the nio with PixelOS: scan shows only the attached band, WPA2-PSK
 connect with the guest's supplicant, DHCP from the real LAN, MAC randomization followed by the host, release
 (deauth, guest disconnected, interface down) and re-attach (guest reconnects in ~3 s).
 
@@ -80,5 +81,4 @@ connect with the guest's supplicant, DHCP from the real LAN, MAC randomization f
   PMF-optional to no PMF when the host wiphy lacks it (PMF-required networks fail).
 - No rfkill state: an unattached band is only disabled channels; the host's regulatory domain isn't forwarded
   (`regdom`); the guest uses its own permissive "99" domain.
-- Bands are attached by the bridge's `auto_attach` config, not yet by the handover groups `wifi-2g`/`wifi-5g`.
 - WPA3-SAE (1.1).

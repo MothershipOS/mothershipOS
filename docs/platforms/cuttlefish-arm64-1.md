@@ -30,8 +30,8 @@ implements it with crosvm; the VMM is not part of the contract.
 **History:** 1.0 (2026.1) initial.
 
 **Gaps in the current implementation (fix before 2026.1):**
-- The bootconfig keys are written into the package's initrd once (`cargo xtask android-initrd`) instead of being set
-  by the host at every start, so a host change wouldn't reach existing packages.
-- The vsock CID is fixed (3) instead of allocated.
+- The bootconfig keys are written into the package's initrd by the VM's build (`pixelOS_16_VM`: `cargo xtask
+  android-initrd`) instead of being set by the host at every start, so a host change wouldn't reach existing
+  packages.
+- The vsock CID comes from `vm.json` `"cid"` (default 3) instead of being allocated.
 - eth1 has DHCP and forwarding chains; V1 defines it as never connected.
-- eth3 and the `mship_wifi` wlan0 assignment don't exist yet.

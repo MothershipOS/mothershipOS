@@ -16,7 +16,7 @@ then uses another network such as native Wi-Fi; without carrier it would keep pr
 **History:** 1.0 (2026.1) initial.
 
 **Gaps in the current implementation (fix before 2026.1):**
-- `efi-virt-arm64` uses QEMU user networking: always connected, not lendable.
+- `efi-virt-arm64`: its tap (`ubtap0`) is always NATed, not lendable.
 - The host tap's carrier follows the attachment, but crosvm doesn't forward tap carrier to virtio-net (the guest
   keeps its link up; Android still drops to Wi-Fi once the network loses DHCP/validation).
 - NAT release has no RST/ICMP path yet.

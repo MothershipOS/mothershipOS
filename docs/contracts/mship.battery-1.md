@@ -46,7 +46,7 @@ service restarts, the guest keeps the last values until it is back (reconnect ev
 **Implementation:** host `crates/mship-devices` (`mship-battery`, `mship-battery.service`: kernel power_supply, uevents + 10 s poll,
 one line per update on `/run/mothership/battery.sock`, any number of readers); crosvm `--battery
 type=goldfish` with `host/gpu/patches/crosvm/0003-mship-battery.patch` (power monitor `mship` reads the socket; adds
-temperature, health and `Full`); guest product `LOCAL_HEALTH_PRODUCT_PACKAGE` = the AOSP health HAL, sysfs label
+temperature, health and `Full`), for both platforms (`efi-virt-arm64`: the guest kernel's `goldfish_battery`); guest product `LOCAL_HEALTH_PRODUCT_PACKAGE` = the AOSP health HAL, sysfs label
 in `sepolicy/genfs_contexts`. Tested 2026-10-18 on the nio with PixelOS: Android's battery service (`dumpsys battery`) shows the
 phone's live level, charging status, AC power, voltage and temperature, the same as the host's power_supply,
 and follows changes (27 % → 29 % while charging). A second reader on the socket gets the same lines alongside
@@ -58,4 +58,3 @@ the VM. Two VMs running at once is not tested yet.
   move would go unnoticed until it runs Enforcing.
 - The gfxstream fallback (Cuttlefish's crosvm) has no `mship` monitor, so that path has no battery slot.
 - Caps aren't published (no broker `list-handles` yet).
-- No battery for `efi-virt-arm64` guests (QEMU) yet.

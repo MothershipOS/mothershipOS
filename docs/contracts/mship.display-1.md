@@ -18,6 +18,8 @@
 **History:** 1.0 (2026.1) initial.
 
 **Gaps in the current implementation (fix before 2026.1):**
-- While empty, `mship-vm-display` completes frame callbacks immediately (unthrottled), instead of at the
-  nominal rate.
-- `efi-virt-arm64`: the display is a QEMU window; its size follows the compositor window, not the caps.
+- While empty, the presenter (`mship-presenter`) completes frame callbacks immediately (unthrottled), instead of
+  at the nominal rate.
+- `efi-virt-arm64` gets the external display (`display:dp0`, group `display-ext`) hot-plugged at the monitor's
+  preferred mode: the display appears and disappears with the monitor, which 1.0 (a fixed mode for the VM's
+  lifetime) doesn't describe.

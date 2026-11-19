@@ -23,4 +23,4 @@ completes. The device therefore also reports `ABS_MT_TOOL_TYPE` (`MT_TOOL_FINGER
 - Release does not cancel active contacts (no palm cancel, no lift).
 - Contacts already down at attach are forwarded mid-gesture.
 - Caps are hardcoded in the launcher (1080 × 2520) instead of coming from the display handle.
-- `efi-virt-arm64`: touch comes from the QEMU window (device "QEMU Virtio MultiTouch"), not from the handle.
+- `efi-virt-arm64` has no touch device; its input is the monitor's or dock's USB devices (`mship.usb`).

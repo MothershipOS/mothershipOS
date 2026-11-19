@@ -1,8 +1,7 @@
 # mship.power 1.0 — system power votes
 
-Status: **implemented (host broker + Ubuntu desktop adapter), 2026-10-25.** Supersedes the request part of
-[mship.power-1.draft.md](mship.power-1.draft.md); sleep preparation (`prepare_sleep`/`ready`) and the manifest
-slot are not in 1.0 yet.
+Status: **implemented on the host (`mothershipd`); not yet in the registry** (`docs/compat.md`,
+`crates/mship-core/src/contracts.rs`) and no manifest slot: every running VM takes part. Open items at the end.
 
 Every participant states what it wants; the host decides. Participants are `mothershipOS` itself and every running
 VM. The phone suspends only when all of them agree, and runs its clocks at least at the highest floor anyone asks
@@ -56,24 +55,42 @@ at least every `heartbeat_s`.
 
 Under crosvm no guest device can wake a suspended guest kernel (virtio devices and the virtual xHCI have no wake
 support), so a guest never suspends itself: its suspend sends `sleep` and blocks. The host (or Power & sleep ›
-Sleep now: local op `sleep_vm`) freezes the VM's vCPUs (`crosvm suspend`), takes its USB devices back
-(`mship-usb detach`) and grabs their input devices exclusively. The first key, button or motion, Wake (`wake_vm`),
-or `mship-admin vm-stop` hands the devices back and resumes it (`crosvm resume`); the guest's `sleep` then returns
+Sleep now, API `vm.sleep`) freezes the VM's vCPUs (`crosvm suspend`), takes its USB devices back
+(`mship-usb detach`) and grabs their input devices exclusively. The first key, button or motion, Wake (`vm.wake`),
+or stopping the VM (`vm.stop`) hands the devices back and resumes it (`crosvm resume`); the guest's `sleep` then returns
 and its normal resume path runs. A frozen VM counts as `suspended` without heartbeats. A guest can hold several
 connections (the agent and the sleep helper); its vote is dropped when the last one closes.
 
 ## Display power
 
-A VM's own display output (its `mship-vm-display` presenter's DRM lease, e.g. the USB-C monitor) follows its vote:
+A VM's own display output (its `mship-presenter` DRM lease, e.g. the USB-C monitor) follows its vote:
 off while its `state` is `screen_off`, `sleeping` or `suspended`, on otherwise; VMs without a vote are left alone.
 A guest's blanking alone only draws black frames (virtio-gpu has no display power), so `screen_off` must mean
 the guest really blanked its screen.
 
 ## Adapters
 
+A VM without a guest adapter gets a vote built by the host from what it sees: its display (the presenter reports
+`vm.display`: on, or blanked) and its video decoder sessions. A running VM without either is `unknown`.
+
 - **Ubuntu desktop** (no agent in the guest; the host follows it from outside): GNOME blanking closes crosvm's
   window and the presenter reports `vm.display` (→ `screen_off`/`active`); an open session on the Venus decoder
   (virtio-media) counts as `codec: high`; the guest's own suspend (GNOME after 15 min) is PSCI SYSTEM_SUSPEND, which
   our crosvm turns into `vm.sleep` (`host/gpu/patches/crosvm/0004-psci-system-suspend.patch`). The power key is a
   virtio-input KEY_POWER that `crosvm powerbtn` presses (logind powers off, `PowerKeyIgnoreInhibited`).
-- **PixelOS:** none yet; it blocks sleep (as before the broker).
+- **PixelOS:** no guest adapter; only the host-built vote above.
+
+## Open (not in 1.0)
+
+- Registry and manifest: register `mship.power` in `docs/compat.md` and `contracts.rs`, and give VMs a slot for it
+  (proposed: `"system_power": {"contract": "mship.power", "version": "1.0"}`, separate from the `power` slot, which
+  is `mship.display-power`). Packages without the slot keep the host-built vote.
+- Sleep preparation: `prepare_sleep` / `ready` / `not_ready` per preparation round, cancelled by any change, so
+  guests can quiesce before a host suspend; final re-check against pending wake events (kernel wakeup count).
+- Timed wakes: a guest with scheduled work needs a wake deadline the host honours before it can allow sleep.
+- `codec` floor has no control yet.
+- Open / unverified: whether PixelOS's host-built vote reaches `screen_off` (its display power goes through the
+  launcher's presenter signals, `mship.display-power`); a PixelOS adapter (wakelocks, idle) is not written.
+
+Standby measurements and the phone side of suspend: the port's notes
+([nio standby](https://github.com/MothershipOS/motorola_nio/blob/main/docs/standby.md)).
