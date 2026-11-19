@@ -14,6 +14,10 @@
 #include <media/v4l2-event.h>
 #include <media/v4l2-ioctl.h>
 
+#if IS_ENABLED(CONFIG_VIRTIO_DMA_SHARED_BUFFER)
+#include <linux/virtio_dma_buf.h>
+#endif
+
 #include "scatterlist_builder.h"
 #include "virtio_media.h"
 
@@ -236,7 +240,8 @@ static int virtio_media_send_wr_ioctl(struct v4l2_fh *fh, u32 ioctl,
  * can have pointers to userspace memory hence this dedicated function.
  */
 static int virtio_media_send_buffer_ioctl(struct v4l2_fh *fh, u32 ioctl,
-					  struct v4l2_buffer *b)
+					  struct v4l2_buffer *b,
+					  uuid_t *uuids, u32 num_uuids)
 {
 	struct video_device *video_dev = fh->vdev;
 	struct virtio_media *vv = to_virtio_media(video_dev);
@@ -279,6 +284,17 @@ static int virtio_media_send_buffer_ioctl(struct v4l2_fh *fh, u32 ioctl,
 	ret = scatterlist_builder_add_buffer(&builder, b);
 	if (ret < 0)
 		return ret;
+
+	/*
+	 * mothershipOS: DMABUF buffers: the virtio object UUID of each plane after the planes (virtio-media's
+	 * README layout), in the device-readable and device-writable sections.
+	 */
+	if (num_uuids) {
+		ret = scatterlist_builder_add_data(&builder, uuids,
+						   sizeof(uuid_t) * num_uuids);
+		if (ret < 0)
+			return ret;
+	}
 
 	end_buf_sg = builder.cur_sg;
 
@@ -734,6 +750,83 @@ static int virtio_media_streamoff(struct file *file, void *fh,
  * Buffer creation/queuing functions deal with the local driver state.
  */
 
+/**
+ * virtio_media_get_objects() - mothershipOS: the virtio objects behind a DMABUF buffer's planes.
+ * @b: buffer with ``V4L2_MEMORY_DMABUF`` memory.
+ * @dmabufs: receives a reference to each plane's DMABUF.
+ * @uuids: receives each plane's virtio object UUID.
+ * @num: receives the number of planes.
+ *
+ * Only virtio objects can be shared with the host (e.g. virtio-gpu buffers exported with a UUID); other DMABUFs
+ * are refused with -EINVAL.
+ */
+static int virtio_media_get_objects(struct virtio_media *vv,
+				    struct v4l2_buffer *b,
+				    struct dma_buf **dmabufs, uuid_t *uuids,
+				    u32 *num)
+{
+#if IS_ENABLED(CONFIG_VIRTIO_DMA_SHARED_BUFFER)
+	u32 n = V4L2_TYPE_IS_MULTIPLANAR(b->type) ? b->length : 1;
+	int i, ret;
+
+	if (n == 0 || n > VIDEO_MAX_PLANES)
+		return -EINVAL;
+
+	for (i = 0; i < n; i++) {
+		int fd = V4L2_TYPE_IS_MULTIPLANAR(b->type) ? b->m.planes[i].m.fd : b->m.fd;
+		struct dma_buf *dmabuf = dma_buf_get(fd);
+
+		if (IS_ERR(dmabuf)) {
+			ret = PTR_ERR(dmabuf);
+			goto err;
+		}
+		dmabufs[i] = dmabuf;
+		if (!is_virtio_dma_buf(dmabuf)) {
+			v4l2_err(&vv->v4l2_dev, "DMABUF plane %d is not a virtio object\n", i);
+			ret = -EINVAL;
+			goto err;
+		}
+		ret = virtio_dma_buf_get_uuid(dmabuf, &uuids[i]);
+		if (ret) {
+			v4l2_err(&vv->v4l2_dev, "DMABUF plane %d: no virtio object UUID (%d)\n", i, ret);
+			goto err;
+		}
+	}
+	*num = n;
+	return 0;
+
+err:
+	for (; i >= 0; i--) {
+		if (dmabufs[i])
+			dma_buf_put(dmabufs[i]);
+		dmabufs[i] = NULL;
+	}
+	return ret;
+#else
+	return -EINVAL;
+#endif
+}
+
+/* Replace @buffer's held DMABUF references with @dmabufs (taken over). */
+static void virtio_media_buffer_hold_dmabufs(struct virtio_media_buffer *buffer,
+					     struct dma_buf **dmabufs)
+{
+	int i;
+
+	virtio_media_buffer_put_dmabufs(buffer);
+	for (i = 0; i < VIDEO_MAX_PLANES; i++)
+		buffer->dmabufs[i] = dmabufs[i];
+}
+
+static void virtio_media_put_dmabufs(struct dma_buf **dmabufs)
+{
+	int i;
+
+	for (i = 0; i < VIDEO_MAX_PLANES; i++)
+		if (dmabufs[i])
+			dma_buf_put(dmabufs[i]);
+}
+
 static int virtio_media_reqbufs(struct file *file, void *fh,
 				struct v4l2_requestbuffers *b)
 {
@@ -748,6 +841,9 @@ static int virtio_media_reqbufs(struct file *file, void *fh,
 	if (b->memory == V4L2_MEMORY_USERPTR && !virtio_media_allow_userptr)
 		return -EINVAL;
 
+	if (b->memory == V4L2_MEMORY_DMABUF && !IS_ENABLED(CONFIG_VIRTIO_DMA_SHARED_BUFFER))
+		return -EINVAL;
+
 	ret = virtio_media_send_wr_ioctl(vfh, VIDIOC_REQBUFS, b, sizeof(*b),
 					 sizeof(*b));
 	if (ret)
@@ -759,6 +855,7 @@ static int virtio_media_reqbufs(struct file *file, void *fh,
 	if (b->count == 0)
 		virtio_media_clear_queue(session, queue);
 
+	virtio_media_queue_put_dmabufs(queue);
 	vfree(queue->buffers);
 	queue->buffers = NULL;
 
@@ -781,8 +878,9 @@ static int virtio_media_reqbufs(struct file *file, void *fh,
 	if (!virtio_media_allow_userptr)
 		b->capabilities &= ~V4L2_BUF_CAP_SUPPORTS_USERPTR;
 
-	/* We do not support DMABUF yet. */
-	b->capabilities &= ~V4L2_BUF_CAP_SUPPORTS_DMABUF;
+	/* mothershipOS: DMABUF buffers work when they are virtio objects (e.g. virtio-gpu buffers) */
+	if (!IS_ENABLED(CONFIG_VIRTIO_DMA_SHARED_BUFFER))
+		b->capabilities &= ~V4L2_BUF_CAP_SUPPORTS_DMABUF;
 
 	return 0;
 }
@@ -796,7 +894,7 @@ static int virtio_media_querybuf(struct file *file, void *fh,
 	struct virtio_media_buffer *buffer;
 	int ret;
 
-	ret = virtio_media_send_buffer_ioctl(vfh, VIDIOC_QUERYBUF, b);
+	ret = virtio_media_send_buffer_ioctl(vfh, VIDIOC_QUERYBUF, b, NULL, 0);
 	if (ret)
 		return ret;
 
@@ -863,9 +961,13 @@ static int virtio_media_prepare_buf(struct file *file, void *fh,
 				    struct v4l2_buffer *b)
 {
 	struct v4l2_fh *vfh = file_to_v4l2_fh(file);
+	struct virtio_media *vv = to_virtio_media(video_devdata(file));
 	struct virtio_media_session *session = fh_to_session(vfh);
 	struct virtio_media_queue_state *queue;
 	struct virtio_media_buffer *buffer;
+	struct dma_buf *dmabufs[VIDEO_MAX_PLANES] = { NULL };
+	uuid_t uuids[VIDEO_MAX_PLANES];
+	u32 num_uuids = 0;
 	int i, ret;
 
 	if (b->type > VIRTIO_MEDIA_LAST_QUEUE)
@@ -883,9 +985,19 @@ static int virtio_media_prepare_buf(struct file *file, void *fh,
 			buffer->planes[i].m = b->m.planes[i].m;
 	}
 
-	ret = virtio_media_send_buffer_ioctl(vfh, VIDIOC_PREPARE_BUF, b);
-	if (ret)
+	if (b->memory == V4L2_MEMORY_DMABUF) {
+		ret = virtio_media_get_objects(vv, b, dmabufs, uuids, &num_uuids);
+		if (ret)
+			return ret;
+	}
+
+	ret = virtio_media_send_buffer_ioctl(vfh, VIDIOC_PREPARE_BUF, b, uuids, num_uuids);
+	if (ret) {
+		virtio_media_put_dmabufs(dmabufs);
 		return ret;
+	}
+	if (num_uuids)
+		virtio_media_buffer_hold_dmabufs(buffer, dmabufs);
 
 	buffer->buffer.flags = V4L2_BUF_FLAG_PREPARED;
 
@@ -895,9 +1007,13 @@ static int virtio_media_prepare_buf(struct file *file, void *fh,
 static int virtio_media_qbuf(struct file *file, void *fh, struct v4l2_buffer *b)
 {
 	struct v4l2_fh *vfh = file_to_v4l2_fh(file);
+	struct virtio_media *vv = to_virtio_media(video_devdata(file));
 	struct virtio_media_session *session = fh_to_session(vfh);
 	struct virtio_media_queue_state *queue;
 	struct virtio_media_buffer *buffer;
+	struct dma_buf *dmabufs[VIDEO_MAX_PLANES] = { NULL };
+	uuid_t uuids[VIDEO_MAX_PLANES];
+	u32 num_uuids = 0;
 	bool prepared;
 	u32 old_flags;
 	int i, ret;
@@ -923,15 +1039,24 @@ static int virtio_media_qbuf(struct file *file, void *fh, struct v4l2_buffer *b)
 				buffer->planes[i].m = b->m.planes[i].m;
 		}
 	}
+	if (b->memory == V4L2_MEMORY_DMABUF) {
+		ret = virtio_media_get_objects(vv, b, dmabufs, uuids, &num_uuids);
+		if (ret)
+			return ret;
+	}
+
 	old_flags = buffer->buffer.flags;
 	buffer->buffer.flags = V4L2_BUF_FLAG_QUEUED;
 
-	ret = virtio_media_send_buffer_ioctl(vfh, VIDIOC_QBUF, b);
+	ret = virtio_media_send_buffer_ioctl(vfh, VIDIOC_QBUF, b, uuids, num_uuids);
 	if (ret) {
 		/* Rollback the previous flags as the buffer is not queued. */
 		buffer->buffer.flags = old_flags;
+		virtio_media_put_dmabufs(dmabufs);
 		return ret;
 	}
+	if (num_uuids)
+		virtio_media_buffer_hold_dmabufs(buffer, dmabufs);
 
 	queue->queued_bufs += 1;
 

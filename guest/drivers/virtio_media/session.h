@@ -9,6 +9,7 @@
 #ifndef __VIRTIO_MEDIA_SESSION_H
 #define __VIRTIO_MEDIA_SESSION_H
 
+#include <linux/dma-buf.h>
 #include <linux/scatterlist.h>
 #include <linux/version.h>
 #include <media/v4l2-fh.h>
@@ -28,12 +29,26 @@
  * @buffer: ``struct v4l2_buffer`` with current information about the buffer.
  * @planes: backing planes array for @buffer.
  * @list: link into the list of buffers pending dequeue.
+ * @dmabufs: mothershipOS: the DMABUFs (virtio objects) last queued with a DMABUF buffer, one per plane. Held
+ *           while the host may use them: until the buffer is queued again, or its queue is freed.
  */
 struct virtio_media_buffer {
 	struct v4l2_buffer buffer;
 	struct v4l2_plane planes[VIDEO_MAX_PLANES];
 	struct list_head list;
+	struct dma_buf *dmabufs[VIDEO_MAX_PLANES];
 };
+
+static inline void virtio_media_buffer_put_dmabufs(struct virtio_media_buffer *buffer)
+{
+	int i;
+
+	for (i = 0; i < VIDEO_MAX_PLANES; i++) {
+		if (buffer->dmabufs[i])
+			dma_buf_put(buffer->dmabufs[i]);
+		buffer->dmabufs[i] = NULL;
+	}
+}
 
 /**
  * struct virtio_media_queue_state - Represents the state of a V4L2 queue.
@@ -113,6 +128,14 @@ struct virtio_media_session {
 
 	struct list_head list;
 };
+
+static inline void virtio_media_queue_put_dmabufs(struct virtio_media_queue_state *queue)
+{
+	size_t i;
+
+	for (i = 0; queue->buffers && i < queue->allocated_bufs; i++)
+		virtio_media_buffer_put_dmabufs(&queue->buffers[i]);
+}
 
 static inline struct virtio_media_session *fh_to_session(struct v4l2_fh *fh)
 {

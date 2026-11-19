@@ -38,3 +38,15 @@ Host side: our media-enabled crosvm (`cargo xtask gpu`, `--features …,media`) 
   it used to be added to `pending_dqbufs`, and once the app queued that buffer again its real event added it a second
   time (list corruption, guest panic; Android's camera app restarting its stream hit it).
 - `override_timestamp` defaults to on: frames carry the guest's CLOCK_MONOTONIC at arrival, not the host's.
+
+## DMABUF buffers (mothershipOS)
+Upstream defines DMABUF buffers as virtio objects in its README but implements them nowhere. Here: QBUF and
+PREPARE_BUF of a `V4L2_MEMORY_DMABUF` buffer resolve each plane's fd to a virtio object (`is_virtio_dma_buf()`,
+`virtio_dma_buf_get_uuid()`: virtio-gpu exports blobs created with `VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE`, which
+minigbm sets for hardware-use buffers) and send the 16-byte UUIDs after the planes, in the command and the response
+(upstream's layout). Other DMABUFs are refused (-EINVAL). The driver holds each plane's DMABUF until the buffer is
+queued again or its queue is freed (REQBUFS, close). The device side is virtio-media crate patch 0003 + crosvm
+patch 0010 (host/gpu/patches): the UUID resolves through the GPU's resource bridge to the resource's host DMABUF,
+which is queued to the host device. Out of tree the GKI config lacks `CONFIG_VIRTIO_DMA_SHARED_BUFFER` (Cuttlefish
+loads `virtio_dma_buf.ko`), so `Kbuild` declares it and links against `virtio_dma_buf.symvers` (the stock module's
+export CRCs). PixelOS decodes into its gralloc buffers this way (v4l2_codec2, the `c2.v4l2.*` codecs).

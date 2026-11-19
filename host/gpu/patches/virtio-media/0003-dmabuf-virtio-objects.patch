@@ -1,0 +1,290 @@
+Patch virtio-media 0.0.8 (crates.io copy): DMABUF buffers as virtio objects (mothershipOS).
+
+virtio-media's README defines DMABUF buffers as virtio objects: the driver sends one 16-byte UUID per plane after
+the v4l2_planes, in the command and the response, and leaves the fd as a placeholder; neither the driver nor this
+crate implemented it. Now QBUF/PREPARE_BUF parse the UUIDs (ioctl::VirtioObjectId) and echo them, REQBUFS accepts
+DMABUF, and the handler trait gets the objects. The V4L2 proxy resolves each with a VirtioObjectResolver (crosvm
+patch 0010: the GPU's resource bridge, a virtio-gpu buffer -> its host DMABUF), queues the host DMABUF to the host
+device (which takes its own reference) and returns the guest's fd values. Without a resolver DMABUF buffers fail.
+Used for decoding straight into the guest's gralloc buffers (mship.video, PixelOS: v4l2_codec2).
+
+diff -ruN a/src/devices/simple_device.rs b/src/devices/simple_device.rs
+--- a/src/devices/simple_device.rs	2026-11-18 06:00:32.095057287 +0000
++++ b/src/devices/simple_device.rs	2026-11-18 06:02:08.488655772 +0000
+@@ -556,6 +556,7 @@
+         session: &mut Self::Session,
+         buffer: v4l2r::ioctl::V4l2Buffer,
+         _guest_regions: Vec<Vec<SgEntry>>,
++        _guest_objects: Vec<crate::ioctl::VirtioObjectId>,
+     ) -> IoctlResult<v4l2r::ioctl::V4l2Buffer> {
+         let host_buffer = session
+             .buffers
+diff -ruN a/src/devices/v4l2_device_proxy.rs b/src/devices/v4l2_device_proxy.rs
+--- a/src/devices/v4l2_device_proxy.rs	2026-11-18 06:00:32.095057287 +0000
++++ b/src/devices/v4l2_device_proxy.rs	2026-11-18 06:02:08.491655853 +0000
+@@ -103,6 +103,43 @@
+ 
+ type GuestAddrType = <UserPtr as Memory>::RawBacking;
+ 
++/// mothershipOS: resolves a virtio object (e.g. a virtio-gpu buffer) to a host DMABUF.
++pub type VirtioObjectResolver = Box<dyn Fn(&crate::ioctl::VirtioObjectId) -> Option<OwnedFd> + Send>;
++
++/// mothershipOS: the host DMABUFs of a `DMABUF` buffer's planes, from their virtio objects. The host device takes
++/// its own reference at QBUF/PREPARE_BUF, the returned fds can be closed after it.
++fn guest_objects_to_host(
++    host_buffer: &mut V4l2Buffer,
++    objects: &[crate::ioctl::VirtioObjectId],
++    resolver: Option<&VirtioObjectResolver>,
++) -> anyhow::Result<Vec<OwnedFd>> {
++    use std::os::fd::AsRawFd;
++    let mut fds = vec![];
++    if let V4l2PlanesWithBackingMut::DmaBuf(planes) = host_buffer.planes_with_backing_iter_mut() {
++        let resolver = resolver.ok_or_else(|| anyhow::anyhow!("DMABUF buffer, but no virtio object resolver"))?;
++        for (i, mut plane) in planes.enumerate() {
++            let object = objects.get(i).ok_or_else(|| anyhow::anyhow!("DMABUF plane {i}: no virtio object"))?;
++            let fd = resolver(object).ok_or_else(|| anyhow::anyhow!("DMABUF plane {i}: unknown virtio object {object:02x?}"))?;
++            plane.set_fd(fd.as_raw_fd());
++            fds.push(fd);
++        }
++    }
++    Ok(fds)
++}
++
++/// mothershipOS: put the guest's fd values back into a `DMABUF` buffer returned by the host.
++fn restore_guest_fds(buffer: &mut V4l2Buffer, guest_buffer: &V4l2Buffer) {
++    let guest_fds: Vec<i32> = match guest_buffer.planes_with_backing_iter() {
++        v4l2r::ioctl::V4l2PlanesWithBacking::DmaBuf(planes) => planes.map(|p| p.fd()).collect(),
++        _ => return,
++    };
++    if let V4l2PlanesWithBackingMut::DmaBuf(planes) = buffer.planes_with_backing_iter_mut() {
++        for (mut plane, fd) in planes.zip(guest_fds) {
++            plane.set_fd(fd);
++        }
++    }
++}
++
+ fn guest_v4l2_buffer_to_host<M: VirtioMediaGuestMemoryMapper>(
+     guest_buffer: &V4l2Buffer,
+     guest_regions: Vec<Vec<SgEntry>>,
+@@ -388,6 +425,9 @@
+ 
+     /// mothershipOS: next guest MMAP offset to try.
+     next_guest_offset: u32,
++
++    /// mothershipOS: virtio objects -> host DMABUFs (`DMABUF` buffers); None: `DMABUF` buffers fail.
++    object_resolver: Option<VirtioObjectResolver>,
+ }
+ 
+ #[derive(Debug)]
+@@ -409,9 +449,16 @@
+             mmap_buffers: Default::default(),
+             mmap_manager: MmapMappingManager::from(mapper),
+             next_guest_offset: 0,
++            object_resolver: None,
+         }
+     }
+ 
++    /// mothershipOS: resolve the virtio objects of `DMABUF` buffers with `resolver`.
++    pub fn with_object_resolver(mut self, resolver: VirtioObjectResolver) -> Self {
++        self.object_resolver = Some(resolver);
++        self
++    }
++
+     fn delete_session(&mut self, session: &V4l2Session<M>) {
+         // Mark all buffers from this session as being inactive.
+         for (&offset, buffer) in self.mmap_buffers.iter_mut() {
+@@ -767,14 +814,20 @@
+         session: &mut Self::Session,
+         guest_buffer: V4l2Buffer,
+         guest_regions: Vec<Vec<SgEntry>>,
++        guest_objects: Vec<crate::ioctl::VirtioObjectId>,
+     ) -> IoctlResult<V4l2Buffer> {
+         // Proactively dequeue output buffers we are done with. Errors can be ignored in
+         // this context.
+         let _ = self.dequeue_output_buffers(session);
+ 
+-        let (host_buffer, guest_resources) =
++        let (mut host_buffer, guest_resources) =
+             guest_v4l2_buffer_to_host(&guest_buffer, guest_regions, &self.mem)
+                 .map_err(|_| libc::EINVAL)?;
++        let _host_fds = guest_objects_to_host(&mut host_buffer, &guest_objects, self.object_resolver.as_ref())
++            .map_err(|e| {
++                error!("{:#}", e.context("while processing QBUF"));
++                libc::EINVAL
++            })?;
+         session.register_userptr_addresses(&host_buffer, &guest_buffer, guest_resources);
+         let queue = host_buffer.queue();
+         let out_buffer = v4l2r::ioctl::qbuf(&session.device, host_buffer)
+@@ -789,6 +842,7 @@
+             })
+             .map(|mut buffer| {
+                 host_mmap_offsets_to_guest(&self.mmap_buffers, session.id, &mut buffer);
++                restore_guest_fds(&mut buffer, &guest_buffer);
+                 buffer
+             })?;
+ 
+@@ -1166,10 +1220,16 @@
+         session: &mut Self::Session,
+         guest_buffer: V4l2Buffer,
+         guest_regions: Vec<Vec<SgEntry>>,
++        guest_objects: Vec<crate::ioctl::VirtioObjectId>,
+     ) -> IoctlResult<V4l2Buffer> {
+-        let (host_buffer, guest_resources) =
++        let (mut host_buffer, guest_resources) =
+             guest_v4l2_buffer_to_host(&guest_buffer, guest_regions, &self.mem)
+                 .map_err(|_| libc::EINVAL)?;
++        let _host_fds = guest_objects_to_host(&mut host_buffer, &guest_objects, self.object_resolver.as_ref())
++            .map_err(|e| {
++                error!("{:#}", e.context("while processing PREPARE_BUF"));
++                libc::EINVAL
++            })?;
+         session.register_userptr_addresses(&host_buffer, &guest_buffer, guest_resources);
+         v4l2r::ioctl::prepare_buf(&session.device, host_buffer)
+             .map_err(|e| e.into_errno())
+@@ -1181,6 +1241,7 @@
+             })
+             .map(|mut buffer| {
+                 host_mmap_offsets_to_guest(&self.mmap_buffers, session.id, &mut buffer);
++                restore_guest_fds(&mut buffer, &guest_buffer);
+                 buffer
+             })
+     }
+diff -ruN a/src/devices/video_decoder.rs b/src/devices/video_decoder.rs
+--- a/src/devices/video_decoder.rs	2026-11-18 06:00:32.095057287 +0000
++++ b/src/devices/video_decoder.rs	2026-11-18 06:02:08.489655799 +0000
+@@ -1181,6 +1181,7 @@
+         session: &mut Self::Session,
+         buffer: V4l2Buffer,
+         _guest_regions: Vec<Vec<SgEntry>>,
++        _guest_objects: Vec<crate::ioctl::VirtioObjectId>,
+     ) -> IoctlResult<V4l2Buffer> {
+         let buffers = match buffer.queue() {
+             QueueType::VideoOutputMplane => &mut session.input_buffers,
+diff -ruN a/src/io/le.rs b/src/io/le.rs
+--- a/src/io/le.rs	2026-11-18 06:00:32.096057314 +0000
++++ b/src/io/le.rs	2026-11-18 06:02:08.486655718 +0000
+@@ -36,6 +36,8 @@
+ impl VmediaType for () {}
+ impl VmediaType for u32 {}
+ impl VmediaType for i32 {}
++/// mothershipOS: a virtio object UUID (DMABUF planes)
++impl VmediaType for [u8; 16] {}
+ 
+ impl VmediaType for CmdHeader {}
+ impl VmediaType for RespHeader {}
+diff -ruN a/src/ioctl.rs b/src/ioctl.rs
+--- a/src/ioctl.rs	2026-11-18 06:00:32.096057314 +0000
++++ b/src/ioctl.rs	2026-11-18 06:02:08.488655772 +0000
+@@ -65,6 +65,10 @@
+ use crate::protocol::SgEntry;
+ use crate::protocol::V4l2Ioctl;
+ 
++/// mothershipOS: the UUID of a virtio object (e.g. a virtio-gpu buffer) backing a `DMABUF` plane. The driver
++/// sends one per plane after the `v4l2_plane`s (virtio-media's README layout), in the command and the response.
++pub type VirtioObjectId = [u8; 16];
++
+ /// Reads a SG list of guest physical addresses passed from the driver and returns it.
+ fn get_userptr_regions<R: ReadFromDescriptorChain>(
+     r: &mut R,
+@@ -103,7 +107,7 @@
+ 
+ /// Implementation to easily read a `v4l2_buffer` of `USERPTR` memory type and its associated
+ /// guest-side buffers from a descriptor chain.
+-impl FromDescriptorChain for (V4l2Buffer, Vec<Vec<SgEntry>>) {
++impl FromDescriptorChain for (V4l2Buffer, Vec<Vec<SgEntry>>, Vec<VirtioObjectId>) {
+     fn read_from_chain<R: ReadFromDescriptorChain>(reader: &mut R) -> IoResult<Self>
+     where
+         Self: Sized,
+@@ -152,7 +156,16 @@
+             vec![]
+         };
+ 
+-        Ok((v4l2_buffer, guest_regions))
++        // mothershipOS: the virtio objects of all planes if the buffer is `DMABUF`.
++        let objects = if let V4l2PlanesWithBacking::DmaBuf(planes) = v4l2_buffer.planes_with_backing_iter() {
++            planes
++                .map(|_| reader.read_obj::<VirtioObjectId>())
++                .collect::<IoResult<Vec<_>>>()?
++        } else {
++            vec![]
++        };
++
++        Ok((v4l2_buffer, guest_regions, objects))
+     }
+ }
+ 
+@@ -223,6 +236,17 @@
+     }
+ }
+ 
++/// mothershipOS: a buffer answering QBUF/PREPARE_BUF, followed by its planes' virtio objects (`DMABUF`).
++impl ToDescriptorChain for (V4l2Buffer, usize, Vec<VirtioObjectId>) {
++    fn write_to_chain<W: WriteToDescriptorChain>(self, writer: &mut W) -> std::io::Result<()> {
++        (self.0, self.1).write_to_chain(writer)?;
++        for object in self.2 {
++            writer.write_obj(object)?;
++        }
++        Ok(())
++    }
++}
++
+ /// Implementation to easily write a `v4l2_ext_controls` struct and its array of controls to a
+ /// descriptor chain.
+ impl ToDescriptorChain for (v4l2_ext_controls, Vec<v4l2_ext_control>) {
+@@ -308,6 +332,7 @@
+         session: &mut Self::Session,
+         buffer: V4l2Buffer,
+         guest_regions: Vec<Vec<SgEntry>>,
++        guest_objects: Vec<VirtioObjectId>,
+     ) -> IoctlResult<V4l2Buffer> {
+         unhandled_ioctl!()
+     }
+@@ -612,6 +637,7 @@
+         session: &mut Self::Session,
+         buffer: V4l2Buffer,
+         guest_regions: Vec<Vec<SgEntry>>,
++        guest_objects: Vec<VirtioObjectId>,
+     ) -> IoctlResult<V4l2Buffer> {
+         unhandled_ioctl!()
+     }
+@@ -861,7 +887,7 @@
+             let flags = MemoryConsistency::from_bits(reqbufs.flags).ok_or(libc::EINVAL)?;
+ 
+             match memory {
+-                MemoryType::Mmap | MemoryType::UserPtr => (),
++                MemoryType::Mmap | MemoryType::UserPtr | MemoryType::DmaBuf => (),
+                 t => {
+                     log::error!(
+                         "VIDIOC_REQBUFS: memory type {:?} is currently unsupported",
+@@ -891,12 +917,12 @@
+         VIDIOC_G_FBUF => invalid_ioctl(ioctl, writer),
+         VIDIOC_S_FBUF => invalid_ioctl(ioctl, writer),
+         VIDIOC_OVERLAY => invalid_ioctl(ioctl, writer),
+-        VIDIOC_QBUF => wr_ioctl(ioctl, reader, writer, |(guest_buffer, guest_regions)| {
++        VIDIOC_QBUF => wr_ioctl(ioctl, reader, writer, |(guest_buffer, guest_regions, guest_objects): (V4l2Buffer, Vec<Vec<SgEntry>>, Vec<VirtioObjectId>)| {
+             let num_planes = guest_buffer.num_planes();
+ 
+             handler
+-                .qbuf(session, guest_buffer, guest_regions)
+-                .map(|guest_buffer| (guest_buffer, num_planes))
++                .qbuf(session, guest_buffer, guest_regions, guest_objects.clone())
++                .map(|guest_buffer| (guest_buffer, num_planes, guest_objects))
+         }),
+         // TODO implement EXPBUF.
+         VIDIOC_EXPBUF => invalid_ioctl(ioctl, writer),
+@@ -1128,12 +1154,12 @@
+ 
+             handler.create_bufs(session, input.count, queue, memory, input.format)
+         }),
+-        VIDIOC_PREPARE_BUF => wr_ioctl(ioctl, reader, writer, |(guest_buffer, guest_regions)| {
++        VIDIOC_PREPARE_BUF => wr_ioctl(ioctl, reader, writer, |(guest_buffer, guest_regions, guest_objects): (V4l2Buffer, Vec<Vec<SgEntry>>, Vec<VirtioObjectId>)| {
+             let num_planes = guest_buffer.num_planes();
+ 
+             handler
+-                .prepare_buf(session, guest_buffer, guest_regions)
+-                .map(|out_buffer| (out_buffer, num_planes))
++                .prepare_buf(session, guest_buffer, guest_regions, guest_objects.clone())
++                .map(|out_buffer| (out_buffer, num_planes, guest_objects))
+         }),
+         VIDIOC_G_SELECTION => wr_ioctl(ioctl, reader, writer, |mut selection: v4l2_selection| {
+             let sel_type = SelectionType::n(selection.type_).ok_or(libc::EINVAL)?;

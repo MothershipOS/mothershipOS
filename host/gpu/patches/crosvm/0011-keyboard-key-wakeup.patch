@@ -1,0 +1,19 @@
+mothershipOS: the virtio keyboard also declares KEY_WAKEUP. Its key bitmap had KEY_POWER but not KEY_WAKEUP, so the
+guest's input core dropped every KEY_WAKEUP the host sent: mship-inputd's wake when it lends the display, and the
+touchscreen's wake gesture (double tap while the panel is off). KEY_WAKEUP wakes the guest without toggling its
+screen (KEY_POWER would put an awake guest to sleep).
+
+diff --git a/devices/src/virtio/input/defaults.rs b/devices/src/virtio/input/defaults.rs
+index 23014baa0..eb9e9529d 100644
+--- a/devices/src/virtio/input/defaults.rs
++++ b/devices/src/virtio/input/defaults.rs
+@@ -444,6 +444,9 @@ fn default_keyboard_events() -> BTreeMap<u16, virtio_input_bitmap> {
+             KEY_MENU,
+             KEY_PRINT,
+             KEY_POWER,
++            // mothershipOS: wakes the guest without toggling its screen (a touchscreen wake gesture, the host
++            // lending the display); KEY_POWER would put an awake guest to sleep
++            KEY_WAKEUP,
+             KEY_HOMEPAGE,
+             KEY_MUTE,
+             KEY_VOLUMEDOWN,

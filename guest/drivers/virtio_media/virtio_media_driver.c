@@ -154,8 +154,10 @@ static void virtio_media_session_free(struct virtio_media *vv,
 
 	sg_free_table(&session->command_sgs);
 
-	for (i = 0; i <= VIRTIO_MEDIA_LAST_QUEUE; i++)
+	for (i = 0; i <= VIRTIO_MEDIA_LAST_QUEUE; i++) {
+		virtio_media_queue_put_dmabufs(&session->queues[i]);
 		vfree(session->queues[i].buffers);
+	}
 
 	kfree(session->shadow_buf);
 	kfree(session);
@@ -724,8 +726,13 @@ static __poll_t virtio_media_device_poll(struct file *file, poll_table *wait)
 	    (!list_empty(&capture_queue->pending_dqbufs) ||
 	     capture_queue->is_capture_last))
 		rc |= EPOLLIN | EPOLLRDNORM;
+	/*
+	 * mothershipOS: like vb2/v4l2_m2m_poll() with streaming I/O: OUTPUT is writable when a buffer is done (waiting
+	 * to be dequeued), not whenever one is free (vb2's rule for read/write emulation only). Free buffers made every
+	 * poll return at once: a decoder that keeps few of its OUTPUT buffers queued spun its poll thread.
+	 */
 	if ((req_events & (EPOLLOUT | EPOLLWRNORM)) && output_queue->streaming &&
-	    output_queue->queued_bufs < output_queue->allocated_bufs)
+	    !list_empty(&output_queue->pending_dqbufs))
 		rc |= EPOLLOUT | EPOLLWRNORM;
 	mutex_unlock(&session->queues_lock);
 
@@ -1039,3 +1046,9 @@ MODULE_DEVICE_TABLE(virtio, id_table);
 MODULE_DESCRIPTION("virtio media driver");
 MODULE_AUTHOR("Alexandre Courbot <gnurou@gmail.com>");
 MODULE_LICENSE("Dual BSD/GPL");
+/* mothershipOS: DMABUF buffers (dma_buf_get/dma_buf_put) */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("DMA_BUF");
+#else
+MODULE_IMPORT_NS(DMA_BUF);
+#endif

@@ -1,0 +1,111 @@
+mothershipOS: each --v4l2-proxy device gets a resource bridge to the GPU and resolves the virtio objects of DMABUF
+buffers (virtio-media patch 0003) to the host DMABUF of the virtio-gpu resource (crosvm's virtio-gpu UUIDs carry
+the resource ID in their last 4 bytes, big endian). The guest can then decode/capture straight into its gralloc
+buffers: zero copy from the host's Venus decoder to the guest's display.
+
+diff --git a/devices/src/virtio/media.rs b/devices/src/virtio/media.rs
+index 0fabdacd0..35317e282 100644
+--- a/devices/src/virtio/media.rs
++++ b/devices/src/virtio/media.rs
+@@ -711,6 +711,7 @@ pub fn create_virtio_media_simple_capture_device(features: u64) -> Box<dyn Virti
+ pub fn create_virtio_media_v4l2_proxy_device<P: AsRef<Path>>(
+     features: u64,
+     device_path: P,
++    resource_bridge: Option<base::Tube>,
+ ) -> anyhow::Result<Box<dyn VirtioDevice>> {
+     use virtio_media::devices::V4l2ProxyDevice;
+     use virtio_media::v4l2r;
+@@ -738,6 +739,9 @@ pub fn create_virtio_media_v4l2_proxy_device<P: AsRef<Path>>(
+     let name_slice = &card.as_bytes()[0..std::cmp::min(card.len(), config.card.len())];
+     config.card.as_mut_slice()[0..name_slice.len()].copy_from_slice(name_slice);
+     let device_path = PathBuf::from(device_path.as_ref());
++    // mothershipOS: DMABUF buffers are virtio objects; virtio-gpu ones resolve to their host DMABUF through the
++    // GPU's resource bridge (crosvm's virtio-gpu UUIDs carry the resource ID in their last 4 bytes, big endian)
++    let resource_bridge = resource_bridge.map(|t| Arc::new(Mutex::new(t)));
+ 
+     let device = CrosvmVirtioMediaDevice::new(
+         features,
+@@ -745,8 +749,21 @@ pub fn create_virtio_media_v4l2_proxy_device<P: AsRef<Path>>(
+         move |event_queue, guest_mapper, host_mapper| {
+             let device =
+                 V4l2ProxyDevice::new(device_path.clone(), event_queue, guest_mapper, host_mapper);
+-
+-            Ok(device)
++            let Some(bridge) = resource_bridge.clone() else {
++                return Ok(device);
++            };
++            Ok(device.with_object_resolver(Box::new(move |uuid: &[u8; 16]| {
++                use crate::virtio::resource_bridge::{get_resource_info, ResourceInfo, ResourceRequest};
++                let id = u32::from_be_bytes([uuid[12], uuid[13], uuid[14], uuid[15]]);
++                match get_resource_info(&bridge.lock(), ResourceRequest::GetBuffer { id }) {
++                    Ok(ResourceInfo::Buffer(info)) => Some(std::os::fd::OwnedFd::from(info.handle)),
++                    Ok(_) => None,
++                    Err(e) => {
++                        error!("virtio-media: virtio object {}: {}", id, e);
++                        None
++                    }
++                }
++            })))
+         },
+     );
+ 
+diff --git a/src/crosvm/sys/linux.rs b/src/crosvm/sys/linux.rs
+index 94857d3be..421005482 100644
+--- a/src/crosvm/sys/linux.rs
++++ b/src/crosvm/sys/linux.rs
+@@ -287,6 +287,22 @@ fn create_virtio_devices(
+         })
+         .collect::<Vec<_>>();
+ 
++    // mothershipOS: each V4L2 proxy gets a resource bridge to the GPU (DMABUF buffers = virtio-gpu buffers)
++    #[cfg(all(feature = "media", feature = "gpu", any(target_os = "android", target_os = "linux")))]
++    let mut v4l2_proxy_bridges = cfg
++        .v4l2_proxy
++        .iter()
++        .map(|_| {
++            cfg.gpu_parameters.as_ref().map(|_| {
++                let (media_tube, gpu_tube) =
++                    Tube::pair().expect("failed to create tube for v4l2 proxy");
++                resource_bridges.push(gpu_tube);
++                media_tube
++            })
++        })
++        .collect::<Vec<_>>()
++        .into_iter();
++
+     #[cfg(feature = "video-encoder")]
+     let video_enc_cfg = cfg
+         .video_enc
+@@ -731,9 +747,13 @@ fn create_virtio_devices(
+     #[cfg(feature = "media")]
+     {
+         for v4l2_device in &cfg.v4l2_proxy {
++            #[cfg(feature = "gpu")]
++            let bridge = v4l2_proxy_bridges.next().flatten();
++            #[cfg(not(feature = "gpu"))]
++            let bridge = None;
+             devs.push((
+                 "v4l2",
+-                create_v4l2_device(cfg.protection_type, v4l2_device)?,
++                create_v4l2_device(cfg.protection_type, v4l2_device, bridge)?,
+             ));
+         }
+     }
+diff --git a/src/crosvm/sys/linux/device_helpers.rs b/src/crosvm/sys/linux/device_helpers.rs
+index 15359bf1a..dda8202ed 100644
+--- a/src/crosvm/sys/linux/device_helpers.rs
++++ b/src/crosvm/sys/linux/device_helpers.rs
+@@ -849,11 +849,12 @@ pub fn create_simple_media_device(protection_type: ProtectionType) -> DeviceResu
+ pub fn create_v4l2_device<P: AsRef<Path>>(
+     protection_type: ProtectionType,
+     path: P,
++    resource_bridge: Option<Tube>,
+ ) -> DeviceResult {
+     use devices::virtio::media::create_virtio_media_v4l2_proxy_device;
+ 
+     let features = virtio::base_features(protection_type);
+-    let dev = create_virtio_media_v4l2_proxy_device(features, path)?;
++    let dev = create_virtio_media_v4l2_proxy_device(features, path, resource_bridge)?;
+ 
+     Ok(VirtioDeviceStub { dev, jail: None })
+ }

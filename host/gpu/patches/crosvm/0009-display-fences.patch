@@ -1,0 +1,325 @@
+mothershipOS: a scanout flush's fence completes when the compositor shows the frame (its Wayland frame callback),
+not at once. The guest's page flip then completes when its frame is on screen, so the buffer it showed before is
+free: real back pressure and vblank pacing for the guest (crosvm said "there is no good way to apply back pressure
+to the guest gpu driver right now"), and zero-copy scanout of guest buffers without the guest drawing into the frame
+being scanned out. Needs a guest that fences its flushes (PixelOS: virtio_gpu.ko patch) and a compositor that sends
+frame callbacks only once a frame is shown (mship-presenter). A fence waits at most 100 ms; a surface with every
+frame callback slot taken counts frames as done at once.
+
+diff --git a/devices/src/virtio/gpu/mod.rs b/devices/src/virtio/gpu/mod.rs
+index d03636b3b..a69aed078 100644
+--- a/devices/src/virtio/gpu/mod.rs
++++ b/devices/src/virtio/gpu/mod.rs
+@@ -352,9 +352,18 @@ pub struct ReturnDescriptor {
+     pub len: u32,
+ }
+ 
++/// mothershipOS: how long a scanout flush fence waits for its frame to be shown at most
++const DISPLAY_FENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
++
+ pub struct Frontend {
+     fence_state: Arc<Mutex<FenceState>>,
+     virtio_gpu: VirtioGpu,
++    /// mothershipOS: completes the fences of scanout flushes once the compositor shows their frame (its frame
++    /// callback), so the guest's page flip completes when the frame is on screen and the buffer it showed before
++    /// is free: back pressure and real vblank pacing for the guest, zero-copy scanout without tearing
++    display_fence_handler: Option<RutabagaFenceHandler>,
++    /// (fence, surface, frames shown it waits for, since)
++    display_fences: std::collections::VecDeque<(RutabagaFence, u32, u64, std::time::Instant)>,
+ }
+ 
+ impl Frontend {
+@@ -362,6 +371,31 @@ impl Frontend {
+         Frontend {
+             fence_state,
+             virtio_gpu,
++            display_fence_handler: None,
++            display_fences: Default::default(),
++        }
++    }
++
++    /// mothershipOS: scanout flush fences complete when their frame is shown (the fence handler completes them).
++    pub fn set_display_fence_handler(&mut self, handler: RutabagaFenceHandler) {
++        self.display_fence_handler = Some(handler);
++    }
++
++    /// mothershipOS: complete the scanout flush fences whose frame was shown (or that waited too long).
++    pub fn complete_display_fences(&mut self) {
++        let Some(handler) = self.display_fence_handler.clone() else { return };
++        while let Some((fence, surface, frame, since)) = self.display_fences.front().copied() {
++            let shown = self
++                .virtio_gpu
++                .display()
++                .borrow()
++                .frames(surface)
++                .is_none_or(|(_, done)| done >= frame);
++            if !shown && since.elapsed() < DISPLAY_FENCE_TIMEOUT {
++                break;
++            }
++            self.display_fences.pop_front();
++            handler.call(fence);
+         }
+     }
+ 
+@@ -702,6 +736,7 @@ impl Frontend {
+                 signal_used = true;
+             }
+         }
++        self.complete_display_fences();
+ 
+         signal_used
+     }
+@@ -756,12 +791,23 @@ impl Frontend {
+                         ctx_id,
+                         ring_idx,
+                     };
+-                    gpu_response = match self.virtio_gpu.create_fence(fence) {
+-                        Ok(_) => gpu_response,
+-                        Err(fence_resp) => {
+-                            warn!("create_fence {} -> {:?}", fence_id, fence_resp);
+-                            fence_resp
++                    // mothershipOS: a scanout flush's fence completes when its frame is shown
++                    let shown_later = match (&self.display_fence_handler, cmd) {
++                        (Some(_), GpuCommand::ResourceFlush(_)) => self.virtio_gpu.take_flushed_frame(),
++                        _ => None,
++                    };
++                    gpu_response = match shown_later {
++                        Some((surface, frame)) => {
++                            self.display_fences.push_back((fence, surface, frame, std::time::Instant::now()));
++                            gpu_response
+                         }
++                        None => match self.virtio_gpu.create_fence(fence) {
++                            Ok(_) => gpu_response,
++                            Err(fence_resp) => {
++                                warn!("create_fence {} -> {:?}", fence_id, fence_resp);
++                                fence_resp
++                            }
++                        },
+                     };
+                 }
+             }
+@@ -994,6 +1040,7 @@ impl Worker {
+         let fence_handler_resources = Arc::new(Mutex::new(None));
+         let fence_handler =
+             create_fence_handler(fence_handler_resources.clone(), fence_state.clone());
++        let display_fence_handler = fence_handler.clone();
+ 
+         let rutabaga = build_rutabaga(
+             &gpu_parameters,
+@@ -1036,7 +1083,11 @@ impl Worker {
+             resource_bridges,
+             suspend_evt,
+             kill_evt,
+-            state: Frontend::new(virtio_gpu, fence_state.clone()),
++            state: {
++                let mut state = Frontend::new(virtio_gpu, fence_state.clone());
++                state.set_display_fence_handler(display_fence_handler);
++                state
++            },
+             fence_state,
+             fence_handler_resources,
+             #[cfg(windows)]
+@@ -1333,6 +1384,7 @@ impl Worker {
+                     }
+                     ProcessDisplayResult::Success => (),
+                 };
++                self.state.complete_display_fences();
+             }
+ 
+             if ctrl_available
+diff --git a/devices/src/virtio/gpu/virtio_gpu.rs b/devices/src/virtio/gpu/virtio_gpu.rs
+index 1ac7e1803..80cc7679c 100644
+--- a/devices/src/virtio/gpu/virtio_gpu.rs
++++ b/devices/src/virtio/gpu/virtio_gpu.rs
+@@ -535,6 +535,8 @@ pub struct VirtioGpu {
+     udmabuf_driver: Option<UdmabufDriver>,
+     snapshot_scratch_directory: Option<PathBuf>,
+     deferred_snapshot_load: Option<VirtioGpuSnapshot>,
++    /// mothershipOS: the last flush_resource committed this frame (surface, frames committed) to the display
++    flushed_frame: Option<(u32, u64)>,
+ }
+ 
+ // Only the 2D mode is supported. Notes on `VirtioGpu` fields:
+@@ -645,6 +647,7 @@ impl VirtioGpu {
+             udmabuf_driver,
+             deferred_snapshot_load: None,
+             snapshot_scratch_directory,
++            flushed_frame: None,
+         })
+     }
+ 
+@@ -809,6 +812,11 @@ impl VirtioGpu {
+         )
+     }
+ 
++    /// mothershipOS: the frame (surface, frames committed) the last flush committed, once.
++    pub fn take_flushed_frame(&mut self) -> Option<(u32, u64)> {
++        self.flushed_frame.take()
++    }
++
+     /// If the resource is the scanout resource, flush it to the display.
+     pub fn flush_resource(&mut self, resource_id: u32) -> VirtioGpuResult {
+         if resource_id == 0 {
+@@ -833,9 +841,18 @@ impl VirtioGpu {
+             None => return Ok(OkNoData),
+         };
+ 
++        self.flushed_frame = None;
+         for scanout in self.scanouts.values_mut() {
+             if scanout.resource_id == resource_id {
++                let before = scanout.surface_id.and_then(|s| self.display.borrow().frames(s));
+                 scanout.flush(&self.display, resource, &mut self.rutabaga)?;
++                if let Some(s) = scanout.surface_id {
++                    if let (Some((c0, _)), Some((c1, _))) = (before, self.display.borrow().frames(s)) {
++                        if c1 > c0 {
++                            self.flushed_frame = Some((s, c1));
++                        }
++                    }
++                }
+             }
+         }
+         if self.cursor_scanout.resource_id == resource_id {
+diff --git a/gpu_display/src/display_wl.c b/gpu_display/src/display_wl.c
+index 73a954cc3..6d4780caf 100644
+--- a/gpu_display/src/display_wl.c
++++ b/gpu_display/src/display_wl.c
+@@ -126,6 +126,8 @@ struct dwl_dmabuf {
+ 	struct dwl_context *context;
+ };
+ 
++#define MAX_FRAME_CALLBACKS 16
++
+ struct dwl_surface {
+ 	struct dwl_context *context;
+ 	struct wl_surface *wl_surface;
+@@ -140,6 +142,10 @@ struct dwl_surface {
+ 	uint32_t surface_id;
+ 	double scale;
+ 	bool close_requested;
++	/* mothershipOS: frames committed / frame callbacks done (the compositor shows the frame), for flush fences */
++	uint64_t frames_committed;
++	uint64_t frames_done;
++	struct wl_callback *frame_callbacks[MAX_FRAME_CALLBACKS];
+ 	size_t buffer_count;
+ 	uint64_t buffer_use_bit_mask;
+ 	struct wl_buffer *buffers[0];
+@@ -1228,13 +1234,57 @@ void dwl_surface_destroy(struct dwl_surface **self)
+ 		wl_surface_destroy((*self)->wl_surface);
+ 	for (i = 0; i < (*self)->buffer_count; i++)
+ 		wl_buffer_destroy((*self)->buffers[i]);
++	for (size_t i = 0; i < MAX_FRAME_CALLBACKS; i++)
++		if ((*self)->frame_callbacks[i])
++			wl_callback_destroy((*self)->frame_callbacks[i]);
+ 	wl_display_flush((*self)->context->display);
+ 	free(*self);
+ 	*self = NULL;
+ }
+ 
++static void surface_frame_done(void *data, struct wl_callback *callback,
++			       uint32_t time)
++{
++	struct dwl_surface *self = data;
++	(void)time;
++	for (size_t i = 0; i < MAX_FRAME_CALLBACKS; i++)
++		if (self->frame_callbacks[i] == callback)
++			self->frame_callbacks[i] = NULL;
++	wl_callback_destroy(callback);
++	self->frames_done++;
++}
++
++static const struct wl_callback_listener surface_frame_listener = {
++    .done = surface_frame_done};
++
++uint64_t dwl_surface_frames_committed(const struct dwl_surface *self)
++{
++	return self->frames_committed;
++}
++
++uint64_t dwl_surface_frames_done(const struct dwl_surface *self)
++{
++	return self->frames_done;
++}
++
+ void dwl_surface_commit(struct dwl_surface *self)
+ {
++	/* mothershipOS: a frame callback per commit; when every slot is taken (the compositor isn't showing frames),
++	 * the frame counts as done at once */
++	size_t slot = MAX_FRAME_CALLBACKS;
++	for (size_t i = 0; i < MAX_FRAME_CALLBACKS; i++)
++		if (!self->frame_callbacks[i]) {
++			slot = i;
++			break;
++		}
++	self->frames_committed++;
++	if (slot < MAX_FRAME_CALLBACKS) {
++		self->frame_callbacks[slot] = wl_surface_frame(self->wl_surface);
++		wl_callback_add_listener(self->frame_callbacks[slot],
++					 &surface_frame_listener, self);
++	} else {
++		self->frames_done++;
++	}
+ 	// It is possible that we are committing frames faster than the
+ 	// compositor can put them on the screen. This may result in dropped
+ 	// frames, but this is acceptable considering there is no good way to
+diff --git a/gpu_display/src/dwl.rs b/gpu_display/src/dwl.rs
+index 4831248ae..424fc5177 100644
+--- a/gpu_display/src/dwl.rs
++++ b/gpu_display/src/dwl.rs
+@@ -150,6 +150,12 @@ extern "C" {
+ extern "C" {
+     pub fn dwl_surface_commit(self_: *mut dwl_surface);
+ }
++extern "C" {
++    pub fn dwl_surface_frames_committed(self_: *const dwl_surface) -> u64;
++}
++extern "C" {
++    pub fn dwl_surface_frames_done(self_: *const dwl_surface) -> u64;
++}
+ extern "C" {
+     pub fn dwl_surface_buffer_in_use(self_: *mut dwl_surface, buffer_index: usize) -> bool;
+ }
+diff --git a/gpu_display/src/gpu_display_wl.rs b/gpu_display/src/gpu_display_wl.rs
+index 9409dbeab..7bb9c5847 100644
+--- a/gpu_display/src/gpu_display_wl.rs
++++ b/gpu_display/src/gpu_display_wl.rs
+@@ -192,6 +192,12 @@ impl GpuDisplaySurface for WaylandSurface {
+             dwl_surface_set_position(self.surface(), x, y);
+         }
+     }
++
++    fn frames(&self) -> Option<(u64, u64)> {
++        // SAFETY:
++        // Safe because only a valid surface is used.
++        unsafe { Some((dwl_surface_frames_committed(self.surface()), dwl_surface_frames_done(self.surface()))) }
++    }
+ }
+ 
+ /// A connection to the compositor and associated collection of state.
+diff --git a/gpu_display/src/lib.rs b/gpu_display/src/lib.rs
+index f7332cb3c..03e2256e8 100644
+--- a/gpu_display/src/lib.rs
++++ b/gpu_display/src/lib.rs
+@@ -252,6 +252,11 @@ trait GpuDisplaySurface {
+         Ok(())
+     }
+ 
++    /// mothershipOS: frames committed and frames the compositor has shown (frame callbacks done), if known.
++    fn frames(&self) -> Option<(u64, u64)> {
++        None
++    }
++
+     /// Sets the mouse mode used on this surface.
+     fn set_mouse_mode(&mut self, _mouse_mode: MouseMode) {
+         // no-op
+@@ -626,6 +631,11 @@ impl GpuDisplay {
+     ///
+     /// If the next buffer is in use, the memory returned from `framebuffer_memory` should not be
+     /// written to.
++    /// mothershipOS: (frames committed, frames shown) of the identified surface, if the backend knows.
++    pub fn frames(&self, surface_id: u32) -> Option<(u64, u64)> {
++        self.surfaces.get(&surface_id).and_then(|s| s.frames())
++    }
++
+     pub fn next_buffer_in_use(&self, surface_id: u32) -> bool {
+         self.surfaces
+             .get(&surface_id)

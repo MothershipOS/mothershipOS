@@ -1,0 +1,62 @@
+mothershipOS: no default context on a native-context host. A file that never called CONTEXT_INIT (a KMS
+client that only imports buffers, e.g. the ranchu HWC) got a default (virgl) context on its first import; a host
+offering the DRM capset and no virgl capset rejects it (crosvm: CtxCreate ComponentError(22)), and every import and
+close then sent a CtxAttachResource/CtxDetachResource that failed (InvalidContextId, ~11/s at boot). Now such a file
+gets no context and no attach/detach; hosts with a virgl capset, or without the DRM capset (gfxstream), as before.
+
+--- a/virtgpu_gem.c
++++ b/virtgpu_gem.c
+@@ -129,6 +129,8 @@
+ 	 * DRM_IOCTL_MODE_CREATE_DUMB or DRM_IOCTL_PRIME_FD_TO_HANDLE
+ 	 */
+ 	virtio_gpu_create_context(obj->dev, file);
++	if (!vfpriv->context_created)
++		goto out_notify;
+ 
+ 	objs = virtio_gpu_array_alloc(1);
+ 	if (!objs)
+@@ -149,7 +151,7 @@
+ 	struct virtio_gpu_fpriv *vfpriv = file->driver_priv;
+ 	struct virtio_gpu_object_array *objs;
+ 
+-	if (!vgdev->has_virgl_3d)
++	if (!vgdev->has_virgl_3d || !vfpriv->context_created)
+ 		return;
+ 
+ 	objs = virtio_gpu_array_alloc(1);
+--- a/virtgpu_ioctl.c
++++ b/virtgpu_ioctl.c
+@@ -59,6 +59,24 @@
+ 	vfpriv->context_created = true;
+ }
+ 
++/* mothershipOS: a native-context host (DRM capset, no virgl capset) has no default context type: a file that
++ * never called CONTEXT_INIT (a KMS client importing buffers, e.g. the HWC) would get a context the host
++ * rejects (EINVAL), then an attach/detach that fails on every buffer import and close */
++static bool virtio_gpu_has_default_context(struct virtio_gpu_device *vgdev)
++{
++	bool drm = false;
++	u32 i;
++
++	for (i = 0; i < vgdev->num_capsets; i++) {
++		if (vgdev->capsets[i].id == VIRTIO_GPU_CAPSET_VIRGL ||
++		    vgdev->capsets[i].id == VIRTIO_GPU_CAPSET_VIRGL2)
++			return true;
++		if (vgdev->capsets[i].id == VIRTIO_GPU_CAPSET_DRM)
++			drm = true;
++	}
++	return !drm;
++}
++
+ void virtio_gpu_create_context(struct drm_device *dev, struct drm_file *file)
+ {
+ 	struct virtio_gpu_device *vgdev = dev->dev_private;
+@@ -67,6 +85,8 @@
+ 	mutex_lock(&vfpriv->context_lock);
+ 	if (vfpriv->context_created)
+ 		goto out_unlock;
++	if (!vfpriv->context_init && !virtio_gpu_has_default_context(vgdev))
++		goto out_unlock;
+ 
+ 	virtio_gpu_create_context_locked(vgdev, vfpriv);
+ 

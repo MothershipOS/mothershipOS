@@ -1,0 +1,4 @@
+0xfd7f09c7	is_virtio_dma_buf	drivers/virtio/virtio_dma_buf	EXPORT_SYMBOL	
+0x3c1dab9d	virtio_dma_buf_attach	drivers/virtio/virtio_dma_buf	EXPORT_SYMBOL	
+0x09a542d1	virtio_dma_buf_export	drivers/virtio/virtio_dma_buf	EXPORT_SYMBOL	
+0xba7891d2	virtio_dma_buf_get_uuid	drivers/virtio/virtio_dma_buf	EXPORT_SYMBOL	

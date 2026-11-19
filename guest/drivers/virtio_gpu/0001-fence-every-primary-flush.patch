@@ -1,0 +1,41 @@
+mothershipOS: fence every primary plane flush (host blobs too, not only dumb guest blobs). virtio_gpu_resource_flush()
+waits for the fence; with crosvm completing it when the frame is on screen (host/gpu/patches/crosvm/0009) the guest's
+page flips complete when the old buffer is free and are paced by the real vblank. Before, flips of host blobs (all
+Android scanout buffers: minigbm cross-domain) completed at once and the guest drew into the frame on screen.
+Module parameter flush_fence (default 1, writable in /sys/module/virtio_gpu/parameters): 0 = stock behaviour.
+
+--- a/virtgpu_plane.c
++++ b/virtgpu_plane.c
+@@ -304,6 +304,12 @@
+ 				  rect.y2 - rect.y1);
+ }
+ 
++/* mothershipOS: fence every primary plane flush (1, default) or only flushes of dumb buffers (0, stock);
++ * writable at run time */
++static bool flush_fence = true;
++module_param(flush_fence, bool, 0644);
++MODULE_PARM_DESC(flush_fence, "Fence every primary plane flush: page flips complete when the frame is shown");
++
+ static int virtio_gpu_plane_prepare_fb(struct drm_plane *plane,
+ 				       struct drm_plane_state *new_state)
+ {
+@@ -319,10 +325,17 @@
+ 	vgfb = to_virtio_gpu_framebuffer(new_state->fb);
+ 	vgplane_st = to_virtio_gpu_plane_state(new_state);
+ 	bo = gem_to_virtio_gpu_obj(vgfb->base.obj[0]);
+-	if (!bo || (plane->type == DRM_PLANE_TYPE_PRIMARY && !bo->guest_blob))
++	if (!bo)
+ 		return 0;
+ 
+-	if (bo->dumb) {
++	/*
++	 * mothershipOS: every primary plane flush is fenced (host blobs too, not only dumb guest blobs), and
++	 * virtio_gpu_resource_flush() waits for it. A host that completes the fence when the frame is on screen
++	 * (crosvm with mothershipOS patch 0009) paces the guest by the real vblank, and a page flip completes when
++	 * the old buffer is free; before, flips of host blobs completed at once and the guest drew into the frame
++	 * being scanned out.
++	 */
++	if (bo->dumb || (flush_fence && plane->type == DRM_PLANE_TYPE_PRIMARY)) {
+ 		vgplane_st->fence = virtio_gpu_fence_alloc(vgdev,
+ 						     vgdev->fence_drv.context,
+ 						     0);

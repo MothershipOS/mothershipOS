@@ -45,13 +45,17 @@ fn minigbm(src: &serde_json::Value, work: &Path) -> Result<PathBuf> {
     let tree = work.join("minigbm");
     git_checkout(&url, &rev, &tree)?;
     let out = work.join("minigbm-out");
-    // the msm backend needs the define itself (the Makefile's DRV_MSM only adds -ldl)
+    // from scratch: make doesn't notice changed CFLAGS (a new define left the old objects in place)
+    let _ = std::fs::remove_dir_all(&out);
+    // the msm backend needs the define itself (the Makefile's DRV_MSM only adds -ldl). NV12 stays linear: the VMs'
+    // video decoder (Venus over virtio-media) writes linear NV12 into these buffers; a UBWC-compressed NV12 buffer
+    // (minigbm's default for decoder / texture use) showed the frames as colour tiles. RGB keeps UBWC.
     let st = Command::new("make")
         .current_dir(&tree)
         .args(["-s", "DRV_MSM=1", &format!("OUT={}", out.display()), "CC_STATIC_LIBRARY(libminigbm.pie.a)"])
         .env("CC", "aarch64-linux-gnu-gcc")
         .env("AR", "aarch64-linux-gnu-ar")
-        .env("CFLAGS", "-O2 -DDRV_MSM")
+        .env("CFLAGS", "-O2 -DDRV_MSM -DQCOM_DISABLE_COMPRESSED_NV12")
         .status()?;
     ensure!(st.success(), "minigbm: make failed");
     std::fs::copy(out.join("libminigbm.pie.a"), out.join("libgbm.a"))?;
