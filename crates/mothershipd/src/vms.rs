@@ -94,7 +94,10 @@ impl Vms {
         }
         let c = load_value(d.join("vm.json")).unwrap_or_default();
         let launcher = c["launcher"].as_str().unwrap_or(VM_LAUNCHER).to_string();
-        let log = d.join(c["log"].as_str().unwrap_or("qemu.log"));
+        // a file name in the VM's directory only (vm.json comes with the VM's package)
+        let Some(log) = c.as_object().and_then(mship_core::manifest::log_name).map(|l| d.join(l)) else {
+            return fail(format!("{name}: vm.json \"log\" must be a file name in the VM directory"));
+        };
         if std::fs::metadata(&log).is_ok_and(|m| m.len() > 0) {
             // keep the previous run's log
             let s = log.to_string_lossy();

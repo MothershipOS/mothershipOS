@@ -184,12 +184,23 @@ impl State {
         let old = std::mem::replace(&mut self.shown, std::mem::replace(&mut self.flipping, Scan::None));
         self.release(old);
         self.zc.stats.flip();
-        self.send_frame_done();
+        // Frame callbacks say "your frame is on screen": crosvm completes the guest's flush fence on them, and the
+        // guest then draws into the buffer it showed before. A frame queued behind this flip isn't on screen yet:
+        // its callbacks wait for its own flip (sent now only if nothing more is flipping).
         match self.queued.take() {
             Some(Queued::Client(b)) => self.present_buffer(b),
             Some(Queued::Copy(i)) => self.present_copy(i),
             Some(Queued::Zc(i)) => self.present_zc(i),
             None => {}
+        }
+        self.frame_done_unless_flipping();
+    }
+
+    /// Frame callbacks of frames that won't flip (nothing pending: panel off, no lease, a failed commit) complete now,
+    /// so the guest is never left waiting for a frame that is not coming.
+    fn frame_done_unless_flipping(&mut self) {
+        if self.kms.as_ref().is_none_or(|k| !k.flip_pending) {
+            self.send_frame_done();
         }
     }
 
@@ -434,9 +445,11 @@ impl State {
                     && let Some(i) = self.copy_frame(&b)
                 {
                     b.release();
-                    return self.present_copy(i);
+                    self.present_copy(i);
+                    return self.frame_done_unless_flipping();
                 }
                 self.present_buffer(b); // frame callbacks complete on page flip
+                self.frame_done_unless_flipping();
             }
             Some(b) if self.kms.is_none() => {
                 if let Some(old) = self.early.replace(b) {

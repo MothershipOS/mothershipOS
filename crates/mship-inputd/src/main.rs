@@ -11,7 +11,8 @@
 //! (`--input keyboard[path=...]`); events go out as virtio_input_event (le16 type, le16 code, le32 value). The
 //! power key (pm8941_pwrkey, a device of its own) belongs to the display: while the VM has the display it is grabbed
 //! and forwarded, so Android sleeps/wakes itself (its screen state then switches the panel); lending the display
-//! also sends KEY_WAKEUP so the VM is awake when it is shown.
+//! also sends KEY_WAKEUP so the VM is awake when it is shown. The touchscreen's wake gesture device (a double tap
+//! while the panel is off reports KEY_WAKEUP: the touch driver's gesture mode) goes with the power key.
 //!
 //! Nothing reaches the VM until mothershipd lends a device, via datagrams on <vm dir>/input.ctl:
 //! - `display on|off`: touchscreen grabbed for / released from the VM
@@ -174,7 +175,9 @@ struct State {
 struct Bridge {
     touch: Dev,
     keys: Vec<Dev>,
-    power: Option<Dev>,
+    /// the power key and the touchscreen's wake gesture (KEY_WAKEUP on a double tap while the panel is off): they
+    /// belong to the display, grabbed and forwarded while the VM has it
+    power: Vec<Dev>,
     /// crosvm's connections: touch, keys
     conn: [Option<UnixStream>; 2],
     st: State,
@@ -205,14 +208,14 @@ impl Bridge {
         for k in &mut self.keys {
             back = k.reopen() && back;
         }
-        if let Some(p) = self.power.as_mut() {
+        for p in &mut self.power {
             back = p.reopen() && back;
         }
         let lent = self.st.display && !self.st.paused;
         let mut ok = self.touch.grab(lent) && back;
-        let woke = lent && !self.shown && self.power.is_some();
+        let woke = lent && !self.shown && !self.power.is_empty();
         self.shown = self.st.display;
-        if let Some(p) = self.power.as_mut() {
+        for p in &mut self.power {
             ok = p.grab(self.st.display) && ok; // also while paused: the VM wakes its own screen
         }
         if woke {
@@ -244,7 +247,7 @@ impl Bridge {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() < 4 {
-        eprintln!("usage: mship-inputd <vm dir> <touch evdev> <key evdev>[,...] [<power key evdev>]");
+        eprintln!("usage: mship-inputd <vm dir> <touch evdev> <key evdev>[,...] [<power key evdev>[,<wake gesture evdev>]]");
         std::process::exit(2);
     }
     let d = Path::new(&a[1]).to_path_buf();
@@ -259,7 +262,7 @@ fn main() {
     let mut b = Bridge {
         touch: open(&a[2]),
         keys: a[3].split(',').filter(|k| !k.is_empty()).map(open).collect(),
-        power: a.get(4).filter(|p| !p.is_empty()).map(|p| open(p)),
+        power: a.get(4).map_or(vec![], |p| p.split(',').filter(|p| !p.is_empty()).map(open).collect()),
         conn: [None, None],
         st: State::default(),
         held: BTreeMap::new(),
@@ -287,10 +290,10 @@ fn main() {
                 k.lost();
             }
         }
-        if let Some(p) = b.power.as_mut().filter(|p| gone(p.fd())) {
+        for p in b.power.iter_mut().filter(|p| gone(p.fd())) {
             p.lost();
         }
-        if !b.touch.alive() || b.keys.iter().any(|k| !k.alive()) || b.power.as_ref().is_some_and(|p| !p.alive()) {
+        if !b.touch.alive() || b.keys.iter().any(|k| !k.alive()) || b.power.iter().any(|p| !p.alive()) {
             b.st.retry = true;
         }
         if b.st.retry {
@@ -317,9 +320,12 @@ fn main() {
                 b.send(TOUCH, &ev);
             }
         }
-        if let Some(p) = b.power.as_mut().filter(|p| ready(p.fd())) {
-            let ev: Vec<Ev> = p.read().into_iter().filter(|e| matches!(e.0, EV_SYN | EV_KEY)).collect();
-            if p.grabbed {
+        for i in 0..b.power.len() {
+            if !ready(b.power[i].fd()) {
+                continue;
+            }
+            let ev: Vec<Ev> = b.power[i].read().into_iter().filter(|e| matches!(e.0, EV_SYN | EV_KEY)).collect();
+            if b.power[i].grabbed {
                 b.send(KEYS, &ev);
             }
         }

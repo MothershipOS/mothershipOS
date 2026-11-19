@@ -140,9 +140,15 @@ pub fn spawn_in(cmd: &[&str], extra: &[(&str, &str)], log: Option<&Path>, cgroup
     let mut c = command(cmd, extra, cgroup);
     match log {
         Some(path) => {
-            let f = std::fs::File::create(path)?;
+            // not through a symlink: the log is in a directory the session user owns
+            use std::os::unix::fs::OpenOptionsExt;
+            let f = std::fs::OpenOptions::new().write(true).create(true).truncate(true)
+                .custom_flags(libc::O_NOFOLLOW).mode(0o644).open(path)?;
+            if !f.metadata()?.is_file() {
+                return Err(std::io::Error::other(format!("{}: not a regular file", path.display())));
+            }
             let (uid, gid) = user();
-            std::os::unix::fs::chown(path, Some(uid), Some(gid))?;
+            std::os::unix::fs::fchown(&f, Some(uid), Some(gid))?;
             c.stdout(f.try_clone()?).stderr(f);
         }
         None => {

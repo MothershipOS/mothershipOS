@@ -7,7 +7,9 @@
 //!   Weights only matter while the CPUs are short: an idle VM leaves its cores to the others either way.
 //! - RAM: every pass (2 s) reads each awake or dozing VM's balloon stats and the host's available memory, and moves
 //!   balloons ([`plan`]): a VM short of free memory is lent more (awake VMs first) from what the host can spare
-//!   above its floor; when the host runs short, VMs give back their spare memory (dozing first), and a dozing VM is
+//!   above its floor; an awake VM that pages in from swap counts as short whatever it reports available (Android's
+//!   lmkd and zram keep "available" near 1 GB by swapping, so it never looked short while it paged 1 GB through zram
+//!   and stuttered on every unlock); when the host runs short, VMs give back their spare memory (dozing first), and a dozing VM is
 //!   squeezed further (its guest frees caches or ends background apps) before the host would swap. A frozen VM is
 //!   left as it is (its guest cannot answer). OOM kills a whole VM (memory.oom.group), never part of one.
 
@@ -40,6 +42,8 @@ const COMFORT_MB: i64 = 2048;
 const STEP_MB: u64 = 512;
 /// least it moves (smaller changes are noise: page reporting and caches move that much all the time)
 const MIN_MOVE_MB: u64 = 64;
+/// an awake guest that paged in this much from swap since the last pass is short of memory
+const PAGING_MB: u64 = 16;
 
 const WEIGHT_AWAKE: u32 = 100;
 const WEIGHT_DOZING: u32 = 20;
@@ -69,6 +73,8 @@ pub struct Guest {
     /// all its RAM (inside and outside the balloon)
     pub size: u64,
     pub balloon: u64,
+    /// it paged in from swap since the last pass (PAGING_MB or more)
+    pub paging: bool,
 }
 
 fn want(c: Class) -> u64 {
@@ -110,9 +116,12 @@ pub fn plan(host_avail: u64, guests: &[Guest]) -> BTreeMap<String, u64> {
     }
     // lend to VMs short of free memory, awake ones first, the neediest first
     let mut order = live.clone();
-    order.sort_by_key(|g| (g.class, std::cmp::Reverse(want(g.class).saturating_sub(g.avail))));
+    order.sort_by_key(|g| (g.class, !g.paging, std::cmp::Reverse(want(g.class).saturating_sub(g.avail))));
     for g in &order {
-        let short = want(g.class).saturating_sub(g.avail);
+        let mut short = want(g.class).saturating_sub(g.avail);
+        if g.paging && g.class == Class::Awake {
+            short = short.max(STEP_MB);
+        }
         let lend = short.min(STEP_MB).min(g.balloon).min(spare.max(0) as u64);
         if lend >= MIN_MOVE_MB {
             out.insert(g.name.clone(), g.balloon - lend);
@@ -123,7 +132,7 @@ pub fn plan(host_avail: u64, guests: &[Guest]) -> BTreeMap<String, u64> {
     if spare < COMFORT_MB - HOST_FLOOR_MB {
         for g in &live {
             let over = g.avail.saturating_sub(want(g.class) + TRIM_MB);
-            if over > 0 && !out.contains_key(&g.name) {
+            if over > 0 && !g.paging && !out.contains_key(&g.name) {
                 take(g, over, &mut out, &mut spare);
             }
         }
@@ -134,6 +143,8 @@ pub fn plan(host_avail: u64, guests: &[Guest]) -> BTreeMap<String, u64> {
 struct Seen {
     weight: u32,
     balloon: Option<u64>,
+    /// the guest's swap_in counter (bytes) at the last pass
+    swap_in: Option<u64>,
 }
 
 pub struct Pool {
@@ -187,7 +198,7 @@ impl Pool {
         }
         let _ = wr(d.join("memory.oom.group"), "1");
         let _ = wr(d.join("cpu.weight"), &WEIGHT_AWAKE.to_string());
-        self.seen.lock().unwrap().insert(vm.into(), Seen { weight: WEIGHT_AWAKE, balloon: None });
+        self.seen.lock().unwrap().insert(vm.into(), Seen { weight: WEIGHT_AWAKE, balloon: None, swap_in: None });
         Some(d)
     }
 
@@ -201,7 +212,17 @@ impl Pool {
             })
             .collect();
         self.weights(&running);
-        let guests: Vec<Guest> = running.iter().filter(|(_, c)| **c != Class::Frozen).filter_map(|(n, c)| stats(n, *c)).collect();
+        let mut guests: Vec<Guest> = Vec::new();
+        {
+            let mut seen = self.seen.lock().unwrap();
+            for (n, c) in running.iter().filter(|(_, c)| **c != Class::Frozen) {
+                let Some((mut g, swap_in)) = stats(n, *c) else { continue };
+                let s = seen.entry(n.clone()).or_insert(Seen { weight: 0, balloon: None, swap_in: None });
+                g.paging = matches!((s.swap_in, swap_in), (Some(a), Some(b)) if b.saturating_sub(a) >= PAGING_MB * MB);
+                s.swap_in = swap_in;
+                guests.push(g);
+            }
+        }
         let changes = plan(pool::host_available_mb(), &guests);
         let mut seen = self.seen.lock().unwrap();
         for (n, mb) in changes {
@@ -212,7 +233,8 @@ impl Pool {
                 println!("pool: {n}: balloon: {}", o.message());
                 continue;
             }
-            println!("pool: {n} ({:?}, {} MB free): {:.1} -> {:.1} GB of {:.1} GB", g.class, g.avail,
+            println!("pool: {n} ({:?}, {} MB free{}): {:.1} -> {:.1} GB of {:.1} GB", g.class, g.avail,
+                     if g.paging { ", paging" } else { "" },
                      (g.size - g.balloon) as f64 / 1024.0, (g.size - mb) as f64 / 1024.0, g.size as f64 / 1024.0);
             if let Some(s) = seen.get_mut(&n) {
                 s.balloon = Some(mb);
@@ -228,7 +250,7 @@ impl Pool {
         let mut seen = self.seen.lock().unwrap();
         for (n, c) in running {
             let w = if *c == Class::Dozing { WEIGHT_DOZING } else { WEIGHT_AWAKE };
-            let s = seen.entry(n.clone()).or_insert(Seen { weight: 0, balloon: None });
+            let s = seen.entry(n.clone()).or_insert(Seen { weight: 0, balloon: None, swap_in: None });
             if s.weight != w && wr(base.join(format!("vm-{n}")).join("cpu.weight"), &w.to_string()).is_ok() {
                 s.weight = w;
             }
@@ -250,8 +272,8 @@ impl Pool {
     }
 }
 
-/// A VM's balloon stats (crosvm balloon_stats; the guest answers), or None.
-fn stats(vm: &str, class: Class) -> Option<Guest> {
+/// A VM's balloon stats (crosvm balloon_stats; the guest answers) and its swap_in counter (bytes), or None.
+fn stats(vm: &str, class: Class) -> Option<(Guest, Option<u64>)> {
     let sock = Path::new(vm::VMS).join(vm).join("crosvm.sock");
     if !sock.exists() {
         return None;
@@ -280,14 +302,14 @@ fn crosvm_mem_mb(sock: &Path) -> Option<u64> {
     })
 }
 
-fn parse_stats(vm: &str, class: Class, size: u64, out: &str) -> Option<Guest> {
+fn parse_stats(vm: &str, class: Class, size: u64, out: &str) -> Option<(Guest, Option<u64>)> {
     let start = out.find('{')?;
     let v: Value = serde_json::Deserializer::from_str(&out[start..]).into_iter().next()?.ok()?;
     let r = if v["BalloonStats"].is_object() { &v["BalloonStats"] } else { &v };
     let balloon = r["balloon_actual"].as_u64()? / MB;
     let s = &r["stats"];
     let avail = s["available_memory"].as_u64().or(s["free_memory"].as_u64())? / MB;
-    Some(Guest { name: vm.into(), class, avail, size, balloon })
+    Some((Guest { name: vm.into(), class, avail, size, balloon, paging: false }, s["swap_in"].as_u64()))
 }
 
 #[cfg(test)]
@@ -295,7 +317,20 @@ mod tests {
     use super::*;
 
     fn g(name: &str, class: Class, avail: u64, balloon: u64) -> Guest {
-        Guest { name: name.into(), class, avail, size: 6000, balloon }
+        Guest { name: name.into(), class, avail, size: 6000, balloon, paging: false }
+    }
+
+    #[test]
+    fn an_awake_vm_that_pages_gets_memory_although_it_reports_enough() {
+        // Android keeps ~1.2 GB "available" by swapping: paging decides
+        let mut a = g("android", Class::Awake, 1200, 2800);
+        assert!(plan(2600, std::slice::from_ref(&a)).is_empty());
+        a.paging = true;
+        assert_eq!(plan(2600, std::slice::from_ref(&a)).get("android"), Some(&(2800 - 512)));
+        // and is not trimmed back while it pages (a tight host would trim 3000 MB available otherwise)
+        let mut big = g("android", Class::Awake, 3000, 1000);
+        big.paging = true;
+        assert!(plan(1500, &[big]).get("android").is_none_or(|b| *b <= 1000));
     }
 
     #[test]
@@ -343,7 +378,7 @@ mod tests {
     fn reads_crosvm_stats() {
         let out = r#"{"BalloonStats":{"stats":{"swap_in":null,"free_memory":524288000,"total_memory":3221225472,
                      "available_memory":1073741824},"balloon_actual":3221225472}}"#;
-        assert_eq!(parse_stats("x", Class::Awake, 6144, out), Some(Guest { name: "x".into(), class: Class::Awake, avail: 1024,
-                                                                     size: 6144, balloon: 3072 }));
+        assert_eq!(parse_stats("x", Class::Awake, 6144, out), Some((Guest { name: "x".into(), class: Class::Awake, avail: 1024,
+                                                                      size: 6144, balloon: 3072, paging: false }, None)));
     }
 }
