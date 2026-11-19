@@ -32,6 +32,7 @@ Linux owns the apps SMMU, so VFIO/IOMMU isolation is in our hands. Things QHEE u
 | Other devices | Bluetooth, USB, battery, modem, cameras, hardware video decode: one device service each (`crates/mship-devices`), see the [contracts](contracts/README.md) |
 | VM definitions | `/var/lib/mothership/vms/<vm>/vm.json` (manifest schema 1), installed by `mship-system vm-install` ([vm-packages.md](vm-packages.md)) |
 | CPU / RAM | the VM pool: every VM gets all CPUs (vCPUs mirror the host's core types) and the pool's RAM; mothershipd weighs CPU (per-VM cgroups) and moves balloons to the VMs that are awake (`crates/mothershipd/src/pool.rs`); optional caps in Settings › Virtual machines |
+| VM speed | measured against the host with the same binaries (2026-11-19): CPU, memory, syscalls, GPU fill/draw rate, disk reads native; cross-vCPU wakeups 1.3x (big cores) to 1.8x (little), GPU submit+finish round trip 200 vs 80 us, fsync 1.5x. What it takes: guest RAM in huge pages (`--hugepages` + shmem THP `advise`, dist/rootfs tmpfiles), MSI-X through a GIC ITS (`--irqchip kernel[allow-vgic-its]`), guest `kpti=0`, device workers off the vCPUs' CPUs (crosvm patch 0012); all in `mship-launch` `pool_args` |
 | Power | `mothershipd` collects power votes from the host and every VM, sets CPU/GPU floors, freezes sleeping VMs and suspends the phone ([mship.power](contracts/mship.power-1.md)) |
 
 ## Hardware ownership

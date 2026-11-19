@@ -1,0 +1,57 @@
+--- a/base/src/lib.rs
++++ b/base/src/lib.rs
+@@ -82,6 +82,7 @@
+ pub use wait_context::EventType;
+ pub use wait_context::TriggeredEvent;
+ pub use wait_context::WaitContext;
++pub use worker_thread::record_process_affinity;
+ pub use worker_thread::WorkerThread;
+ pub use write_zeroes::PunchHole;
+ pub use write_zeroes::WriteZeroesAt;
+--- a/base/src/worker_thread.rs
++++ b/base/src/worker_thread.rs
+@@ -12,6 +12,19 @@
+ use crate::Error;
+ use crate::Event;
+ 
++/// The CPUs the process may run on, recorded before the vCPU threads pin themselves.
++static PROCESS_AFFINITY: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
++
++/// Records the calling thread's CPU affinity as the process's, once. The vCPU threads call it before pinning
++/// themselves: devices are activated from a vCPU thread (the guest's register write) and a thread inherits its
++/// creator's affinity, so without this every device worker would share one vCPU's CPUs.
++pub fn record_process_affinity() {
++    #[cfg(any(target_os = "android", target_os = "linux"))]
++    if let Ok(cpus) = crate::get_cpu_affinity() {
++        let _ = PROCESS_AFFINITY.set(cpus);
++    }
++}
++
+ /// Wrapper object for creating a worker thread that can be stopped by signaling an event.
+ pub struct WorkerThread<T: Send + 'static> {
+     worker: Option<(Event, JoinHandle<T>)>,
+@@ -33,7 +46,13 @@
+ 
+         let thread_handle = thread::Builder::new()
+             .name(thread_name.into())
+-            .spawn(move || thread_func(thread_stop_event))
++            .spawn(move || {
++                #[cfg(any(target_os = "android", target_os = "linux"))]
++                if let Some(cpus) = PROCESS_AFFINITY.get().filter(|c| !c.is_empty()) {
++                    let _ = crate::set_cpu_affinity(cpus.iter().copied());
++                }
++                thread_func(thread_stop_event)
++            })
+             .expect("thread spawn failed");
+ 
+         WorkerThread {
+--- a/src/crosvm/sys/linux/vcpu.rs
++++ b/src/crosvm/sys/linux/vcpu.rs
+@@ -105,6 +105,7 @@
+     // vcpu_affinity needs to be set after moving to cgroup
+     // or it will be overriden by cgroup settings, vcpu_affinity
+     // here is bounded by the cpuset specified in the cgroup
++    base::record_process_affinity();
+     if !vcpu_affinity.is_empty() {
+         if let Err(e) = set_cpu_affinity(vcpu_affinity) {
+             error!("Failed to set CPU affinity: {}", e);
