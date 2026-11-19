@@ -1,14 +1,6 @@
-//! The modem slot (mship.modem 1.x): AT commands between a VM's radio stack and the phone's modem.
-//!
-//! The guest's RIL connects to the host over vsock (cuttlefish-arm64: the modem simulator port, 9600). While the VM
-//! holds the cellular handle, its commands go to the modem's WWAN AT port unchanged and the modem's responses and
-//! unsolicited results come back, with three exceptions: the packet-data commands. A data call is the host's to
-//! make, because its packets must reach the VM's data NIC: `ATD*99***<cid>#` and `AT+CGACT=1,<cid>` start a QMI
-//! session on the context (answered `OK`, as Cuttlefish's modem simulator does, never `CONNECT`), `AT+CGACT=0,...`
-//! ends the VM's sessions only (never the modem's default bearer), `AT+CGDATA` is refused. In the answers to
-//! `AT+CGDCONT?` and `AT+CGCONTRDP` an active context shows its address and gateway.
-//!
-//! Empty slot: the guest's bytes are dropped and nothing answers.
+//! The modem slot's transport: the VMs' radio stacks over vsock (cuttlefish-arm64: the modem simulator port, 9600)
+//! and the modem's WWAN AT port. What a command means is `radio`'s business (for the VM holding the handle, and for
+//! the others, which see an empty slot): this moves whole command units in and whole lines out.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -21,27 +13,7 @@ pub const PORT: u32 = 9600;
 /// bytes queued towards a guest that doesn't read; beyond that output is dropped
 const OUT_MAX: usize = 1 << 20;
 
-/// What a guest command asks for.
-#[derive(Debug, PartialEq)]
-pub enum Cmd {
-    /// to the modem, as is
-    Forward(Vec<u8>),
-    /// start data on these contexts
-    Activate(Vec<u8>),
-    /// end the VM's data on these contexts (none: all of them)
-    Deactivate(Vec<u8>),
-    /// answered by the host: OK (true) or ERROR
-    Answer(bool),
-}
-
-/// An active context of the holder: shown in the context answers.
-pub struct Context {
-    /// "a.b.c.d/len"
-    pub address: String,
-    pub gateway: String,
-}
-
-/// Whole command units from the guest's stream: a command line up to CR, or an SMS PDU up to Ctrl-Z / ESC (after
+/// Whole command units from a guest's stream: a command line up to CR, or an SMS PDU up to Ctrl-Z / ESC (after
 /// `+CMGS=` / `+CMGW=`). The rest stays in `buf`.
 pub fn split(buf: &mut Vec<u8>, pdu: &mut bool) -> Vec<Vec<u8>> {
     let mut out = vec![];
@@ -60,71 +32,11 @@ pub fn split(buf: &mut Vec<u8>, pdu: &mut bool) -> Vec<Vec<u8>> {
     out
 }
 
-fn ints(s: &str) -> Vec<u8> {
-    s.split(',').filter_map(|x| x.trim().parse().ok()).collect()
-}
-
-/// What one unit asks for; `defined` = the context the guest defined last (`AT+CGDCONT=<cid>,...`).
-pub fn classify(unit: &[u8], defined: &mut Option<u8>) -> Cmd {
-    let t = String::from_utf8_lossy(unit).trim().to_ascii_uppercase();
-    if let Some(rest) = t.strip_prefix("AT+CGDCONT=") {
-        if let Some(cid) = ints(rest).first().filter(|_| rest.contains(',')) {
-            *defined = Some(*cid);
-        }
-        return Cmd::Forward(unit.to_vec());
-    }
-    if let Some(rest) = t.strip_prefix("ATD*99") {
-        // ATD*99***<cid># (the simulator's RIL dials 1 for whichever context it just defined)
-        let dialed: Option<u8> = rest.trim_end_matches('#').rsplit('*').next().and_then(|c| c.parse().ok());
-        return Cmd::Activate(vec![defined.or(dialed).unwrap_or(1)]);
-    }
-    if let Some(rest) = t.strip_prefix("AT+CGACT=") {
-        let mut v = ints(rest);
-        let state = if v.is_empty() { 0 } else { v.remove(0) };
-        v.retain(|c| *c != 0);
-        return match (state, v.is_empty()) {
-            (1, true) => Cmd::Answer(true), // "AT+CGACT=1,0": the simulator's RIL resetting, nothing to do
-            (1, false) => Cmd::Activate(v),
-            _ => Cmd::Deactivate(v),
-        };
-    }
-    if t.starts_with("AT+CGDATA") {
-        return Cmd::Answer(false);
-    }
-    Cmd::Forward(unit.to_vec())
-}
-
-/// A modem line as the holder sees it: active contexts show their address and gateway.
-pub fn rewrite(line: &str, ctx: &BTreeMap<u8, Context>) -> String {
-    let body = line.trim_end_matches(['\r', '\n']);
-    let ending = &line[body.len()..];
-    let (prefix, at) = if let Some(r) = body.strip_prefix("+CGDCONT: ") {
-        ("+CGDCONT: ", r)
-    } else if let Some(r) = body.strip_prefix("+CGCONTRDP: ") {
-        ("+CGCONTRDP: ", r)
-    } else {
-        return line.to_string();
-    };
-    let mut f: Vec<String> = at.split(',').map(String::from).collect();
-    let Some(c) = f.first().and_then(|c| c.trim().parse::<u8>().ok()).and_then(|cid| ctx.get(&cid)) else {
-        return line.to_string();
-    };
-    if prefix == "+CGDCONT: " && f.len() > 3 {
-        // cid,"type","apn","address",...
-        f[3] = format!("\"{}\"", c.address);
-    } else if prefix == "+CGCONTRDP: " && f.len() > 4 && f[4].trim_matches('"').is_empty() {
-        // cid,bearer,apn,local address,gateway,dns...
-        f[4] = c.gateway.clone();
-    }
-    format!("{prefix}{}{ending}", f.join(","))
-}
-
 pub struct Guest {
     stream: vsock::VsockStream,
     inbuf: Vec<u8>,
     out: Vec<u8>,
     pdu: bool,
-    defined: Option<u8>,
 }
 
 impl Guest {
@@ -158,6 +70,8 @@ pub struct At {
     pbuf: Vec<u8>,
     /// the vsock CID of the VM holding the handle
     pub owner: Option<u32>,
+    /// guests already logged as connected to the empty slot (logged once)
+    idle: std::collections::BTreeSet<u32>,
 }
 
 impl At {
@@ -165,7 +79,7 @@ impl At {
         let listener = vsock::VsockListener::bind_with_cid_port(libc::VMADDR_CID_ANY, PORT)?;
         listener.set_nonblocking(true)?;
         log(format!("modem slot: vsock port {PORT}, AT port {path}"));
-        Ok(Self { listener, guests: BTreeMap::new(), path: path.into(), port: None, pbuf: vec![], owner: None })
+        Ok(Self { listener, guests: BTreeMap::new(), path: path.into(), port: None, pbuf: vec![], owner: None, idle: Default::default() })
     }
 
     pub fn listener_fd(&self) -> RawFd {
@@ -184,16 +98,22 @@ impl At {
         self.guests.iter().map(|(c, g)| (g.stream.as_raw_fd(), *c)).collect()
     }
 
-    pub fn accept(&mut self) {
+    /// New connections; true if the holder (re)connected (its RIL starts over).
+    pub fn accept(&mut self) -> bool {
+        let mut holder = false;
         while let Ok((stream, addr)) = self.listener.accept() {
             let cid = addr.cid();
             let _ = stream.set_nonblocking(true);
-            if self.guests.insert(cid, Guest { stream, inbuf: vec![], out: vec![], pdu: false, defined: None }).is_some() {
-                log(format!("cid {cid}: radio reconnected"));
-            } else {
-                log(format!("cid {cid}: radio connected{}", if self.owner == Some(cid) { "" } else { " (slot empty)" }));
+            let again = self.guests.insert(cid, Guest { stream, inbuf: vec![], out: vec![], pdu: false }).is_some();
+            if self.owner == Some(cid) {
+                self.idle.remove(&cid);
+                holder = true;
+                log(format!("cid {cid}: radio {}", if again { "reconnected" } else { "connected" }));
+            } else if self.idle.insert(cid) {
+                log(format!("cid {cid}: radio connected (slot empty)"));
             }
         }
+        holder
     }
 
     /// Close a guest's connection: its RIL reconnects and starts over (fresh on attach, after release).
@@ -239,14 +159,29 @@ impl At {
         }
     }
 
-    pub fn answer(&mut self, cid: u32, ok: bool) {
-        if let Some(g) = self.guests.get_mut(&cid) {
-            g.queue(if ok { b"\r\nOK\r\n" } else { b"\r\nERROR\r\n" });
+    /// Lines to the holder (each framed CR LF, as a modem sends them); false: no holder connected.
+    pub fn tell_holder(&mut self, lines: &[String]) -> bool {
+        match self.owner {
+            Some(c) => self.tell(c, lines),
+            None => false,
         }
     }
 
-    /// A guest's readable stream: its commands (only the holder's count; an empty slot drops them).
-    pub fn read_guest(&mut self, cid: u32) -> Vec<Cmd> {
+    /// Lines to a guest; false: not connected.
+    pub fn tell(&mut self, cid: u32, lines: &[String]) -> bool {
+        match self.guests.get_mut(&cid) {
+            Some(g) => {
+                for l in lines {
+                    g.queue(format!("\r\n{l}\r\n").as_bytes());
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A guest's readable stream: its command units.
+    pub fn read_guest(&mut self, cid: u32) -> Vec<Vec<u8>> {
         let Some(g) = self.guests.get_mut(&cid) else { return vec![] };
         if !g.flush() {
             self.guests.remove(&cid);
@@ -259,20 +194,18 @@ impl At {
             Err(_) => 0,
         };
         if n == 0 {
-            log(format!("cid {cid}: radio disconnected"));
+            if self.owner == Some(cid) {
+                log(format!("cid {cid}: radio disconnected"));
+            }
             self.guests.remove(&cid);
             return vec![];
         }
-        if self.owner != Some(cid) {
-            return vec![];
-        }
         g.inbuf.extend_from_slice(&b[..n]);
-        let units = split(&mut g.inbuf, &mut g.pdu);
-        units.iter().map(|u| classify(u, &mut g.defined)).collect()
+        split(&mut g.inbuf, &mut g.pdu)
     }
 
-    /// The modem's readable port: to the holder, contexts rewritten.
-    pub fn read_modem(&mut self, ctx: &BTreeMap<u8, Context>) {
+    /// The modem's readable port: its lines to the holder, those `keep` passes.
+    pub fn read_modem(&mut self, keep: impl Fn(&str) -> bool) {
         let Some(p) = self.port.as_mut() else { return };
         let mut b = vec![0u8; 16384];
         match p.read(&mut b) {
@@ -287,7 +220,9 @@ impl At {
         let mut out = vec![];
         while let Some(i) = self.pbuf.iter().position(|c| *c == b'\n') {
             let line: Vec<u8> = self.pbuf.drain(..=i).collect();
-            out.extend_from_slice(rewrite(&String::from_utf8_lossy(&line), ctx).as_bytes());
+            if keep(&String::from_utf8_lossy(&line)) {
+                out.extend_from_slice(&line);
+            }
         }
         // the SMS prompt ("> ") has no line end
         if self.pbuf.trim_ascii_start().starts_with(b">") {
@@ -312,39 +247,11 @@ mod tests {
 
     #[test]
     fn units() {
+        let mut b = b"AT+CSQ\rAT+CMGS=23\r0011000B91\x1aAT+CL".to_vec();
         let mut pdu = false;
-        let mut b = b"ATE0\rAT+CMGS=23\r0011000B91\x1aAT+CSQ\rAT+C".to_vec();
         let u = split(&mut b, &mut pdu);
-        assert_eq!(u, [b"ATE0\r".to_vec(), b"AT+CMGS=23\r".to_vec(), b"0011000B91\x1a".to_vec(), b"AT+CSQ\r".to_vec()]);
-        assert_eq!(b, b"AT+C");
+        assert_eq!(u, vec![b"AT+CSQ\r".to_vec(), b"AT+CMGS=23\r".to_vec(), b"0011000B91\x1a".to_vec()]);
+        assert_eq!(b, b"AT+CL");
         assert!(!pdu);
-    }
-
-    #[test]
-    fn data_commands() {
-        let mut d = None;
-        assert!(matches!(classify(b"AT+CGDCONT=3,\"IP\",\"o2internet\",,0,0\r", &mut d), Cmd::Forward(_)));
-        assert_eq!(d, Some(3));
-        assert_eq!(classify(b"ATD*99***1#\r", &mut d), Cmd::Activate(vec![3])); // the context just defined
-        assert_eq!(classify(b"AT+CGACT=1,0\r", &mut d), Cmd::Answer(true));
-        assert_eq!(classify(b"AT+CGACT=1,2\r", &mut d), Cmd::Activate(vec![2]));
-        assert_eq!(classify(b"AT+CGACT=0,2,3\r", &mut d), Cmd::Deactivate(vec![2, 3]));
-        assert_eq!(classify(b"AT+CGACT=0\r", &mut d), Cmd::Deactivate(vec![]));
-        assert_eq!(classify(b"AT+CGDATA=\"PPP\",1\r", &mut d), Cmd::Answer(false));
-        let mut none = None;
-        assert_eq!(classify(b"ATD*99***2#\r", &mut none), Cmd::Activate(vec![2]));
-        assert!(matches!(classify(b"AT+CGACT?\r", &mut d), Cmd::Forward(_)));
-    }
-
-    #[test]
-    fn context_answers() {
-        let ctx = BTreeMap::from([(1u8, Context { address: "10.33.27.77/30".into(), gateway: "10.33.27.78".into() })]);
-        assert_eq!(rewrite("+CGDCONT: 1,\"IPV4V6\",\"\",\"0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0\",0,0,0,0\r\n", &ctx),
-                   "+CGDCONT: 1,\"IPV4V6\",\"\",\"10.33.27.77/30\",0,0,0,0\r\n");
-        assert_eq!(rewrite("+CGCONTRDP: 1,6,o2internet,10.33.27.77,,31.3.32.48,\r\n", &ctx),
-                   "+CGCONTRDP: 1,6,o2internet,10.33.27.77,10.33.27.78,31.3.32.48,\r\n");
-        let other = "+CGDCONT: 2,\"IPV4V6\",\"ims\",\"0.0.0.0\",0,0\r\n";
-        assert_eq!(rewrite(other, &ctx), other);
-        assert_eq!(rewrite("+CSQ: 21,99\r\n", &ctx), "+CSQ: 21,99\r\n");
     }
 }
