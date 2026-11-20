@@ -32,7 +32,9 @@ const PROGRAMS: &[(&str, &str)] = &[
     ("mship-battery", "usr/local/sbin"),
     ("mship-bt-bridge", "usr/local/sbin"),
     ("mship-camera", "usr/local/sbin"),
+    ("mship-gnss", "usr/local/sbin"),
     ("mship-modem", "usr/local/sbin"),
+    ("mship-sensors", "usr/local/sbin"),
     ("mship-usb", "usr/local/sbin"),
     ("mship-wifi-bridge", "usr/local/sbin"),
     ("mship", "usr/local/bin"),
@@ -113,6 +115,7 @@ fn dist() -> Result<()> {
     add_file(&mut tar, &sway.wlroots, "usr/local/lib/mothership-wlroots/libwlroots-0.19.so", 0o644, rootown)?;
     add_file(&mut tar, &sway.sway, "usr/local/bin/sway-mship", 0o755, rootown)?;
     add_file(&mut tar, &host::vhost_sound()?, "usr/local/bin/vhost-device-sound", 0o755, rootown)?;
+    add_file(&mut tar, &host::hexagonrpcd()?, "usr/local/lib/mothership/hexagonrpcd", 0o755, rootown)?;
     let rel = out.join("release");
     std::fs::write(&rel, format!("{release}\n"))?;
     add_file(&mut tar, &rel, "usr/share/mothership/release", 0o644, rootown)?;
@@ -132,10 +135,11 @@ fn main() -> Result<()> {
         "abl-dtb" => boot::abl_dtb(&std::env::args().skip(2).collect::<Vec<_>>()).map(|_| ()),
         "sway" => host::sway().map(|_| ()),
         "vhost-sound" => host::vhost_sound().map(|_| ()),
+        "hexagonrpc" => host::hexagonrpcd().map(|_| ()),
         "dist" => dist(),
         "" | "help" => {
             println!(
-                "cargo xtask <task>\n  check         clippy (warnings are errors) and the tests\n  gpu           the phone's VMM: crosvm, virglrenderer, minigbm\n  host-kernel   the phone's kernel and modules\n  initramfs     the phone's initramfs (mship-init, busybox, early firmware, the kernel's modules)\n  fit           the boot image for boot_b (kernel + DTB + initramfs)\n  abl-dtb [--diagnostic] [--dtbo <img>]  the ABL-path board DTB, checked\n  sway          sway-mship and its wlroots\n  vhost-sound   the VMs' sound backend\n  dist          build for the phone and pack the release tarball (target/dist)"
+                "cargo xtask <task>\n  check         clippy (warnings are errors) and the tests\n  gpu           the phone's VMM: crosvm, virglrenderer, minigbm\n  host-kernel   the phone's kernel and modules\n  initramfs     the phone's initramfs (mship-init, busybox, early firmware, the kernel's modules)\n  fit           the boot image for boot_b (kernel + DTB + initramfs)\n  abl-dtb [--diagnostic] [--dtbo <img>]  the ABL-path board DTB, checked\n  sway          sway-mship and its wlroots\n  vhost-sound   the VMs' sound backend\n  hexagonrpc    the sensor DSP's file server (hexagonrpcd)\n  dist          build for the phone and pack the release tarball (target/dist)"
             );
             Ok(())
         }

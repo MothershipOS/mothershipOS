@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gdk, glib};
-use mship_core::api::{HandoverState, Op, PowerState, ShowResult, StoreStatus, Topic, VmInfo, VmList, VoteState};
+use mship_core::api::{HandleList, HandoverState, Op, PowerState, ShowResult, StoreStatus, Topic, VmInfo, VmList, VoteState};
 use mship_core::status::{BatteryStatus, HostStatus, RegionStatus};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -37,25 +37,6 @@ const CSS: &str = "
 .vm-running { color: @success_color; }
 ";
 
-/// Hardware that can be assigned to a VM (mothershipd handover.assign).
-pub const HW: &[(&str, &str, &str)] = &[
-    ("display", "Display & touchscreen", "video-display-symbolic"),
-    ("buttons", "Volume buttons", "audio-volume-high-symbolic"),
-    ("wifi-2g", "Wi-Fi 2.4 GHz", "network-wireless-symbolic"),
-    ("wifi-5g", "Wi-Fi 5 GHz", "network-wireless-symbolic"),
-    ("internet", "Shared internet", "network-transmit-receive-symbolic"),
-    ("bluetooth", "Bluetooth", "bluetooth-active-symbolic"),
-    ("usb", "USB devices", "media-removable-symbolic"),
-    ("display-ext", "External display (USB-C)", "video-joined-displays-symbolic"),
-    ("cellular", "Mobile network (SIM, calls, data)", "network-cellular-symbolic"),
-    ("cameras", "Cameras", "camera-photo-symbolic"),
-    ("speaker", "Speaker", "audio-speakers-symbolic"),
-    ("earpiece", "Earpiece", "call-start-symbolic"),
-    ("headset", "Headset (3.5 mm jack)", "audio-headset-symbolic"),
-    ("microphone", "Microphones", "audio-input-microphone-symbolic"),
-];
-/// lent while the VM is shown; the rest while it runs
-pub const HW_SCREEN: &[&str] = &["display", "buttons"];
 
 pub const PROFILES: &[&str] = &["cool", "balanced", "performance"];
 
@@ -206,6 +187,11 @@ impl Shell {
 
     pub fn handover(&self) -> HandoverState {
         self.broker.state_as(Topic::Handover)
+    }
+
+    /// The hardware mothershipOS knows (the handle registry): what Settings › Hardware shows.
+    pub fn handles(&self) -> HandleList {
+        self.broker.state_as(Topic::Handles)
     }
 
     // ------------------------------------------------ home
@@ -499,7 +485,7 @@ fn activate(app: &adw::Application) {
         win: win.clone(),
         nav,
         toasts,
-        broker: Broker::new(&[Topic::Power, Topic::Vms, Topic::Handover, Topic::Host]),
+        broker: Broker::new(&[Topic::Power, Topic::Vms, Topic::Handover, Topic::Host, Topic::Handles]),
         status: RefCell::default(),
         clock24: Cell::new(true),
         batt_short: RefCell::default(),

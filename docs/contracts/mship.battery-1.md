@@ -5,6 +5,16 @@ sharing `shared`, no group: it isn't lent, and there is no attach or release. Th
 the charger and every charging decision (charge limit, charging on/off in the host's Settings). Nothing a guest
 does reaches them.
 
+- **Works:** in PixelOS, Android's battery service (`dumpsys battery`) shows the phone's live level, charging status,
+  AC power, voltage and temperature, the same as the host's power_supply, and follows changes. A second reader on
+  the host socket gets the same lines alongside the VM.
+- **Needs work:**
+  - The sysfs label (`genfs_contexts`) names the device's MMIO address (`20e9000`), which comes from crosvm's
+    allocation. A different device set or crosvm version can move it. The guest runs Permissive, so a move goes
+    unnoticed until it runs Enforcing.
+  - Unverified: two VMs reading the battery at once.
+- **Not implemented:** a battery slot on the gfxstream fallback (Cuttlefish's crosvm has no `mship` monitor).
+
 ## Guest view
 - **Device:** a goldfish battery (`compatible = "google,goldfish-battery"`, MMIO + one interrupt; the platform
   says where). The guest's `goldfish_battery` driver turns it into two Linux power_supply devices: `battery`
@@ -47,14 +57,4 @@ service restarts, the guest keeps the last values until it is back (reconnect ev
 one line per update on `/run/mothership/battery.sock`, any number of readers); crosvm `--battery
 type=goldfish` with `host/gpu/patches/crosvm/0003-mship-battery.patch` (power monitor `mship` reads the socket; adds
 temperature, health and `Full`), for both platforms (`efi-virt-arm64`: the guest kernel's `goldfish_battery`); guest product `LOCAL_HEALTH_PRODUCT_PACKAGE` = the AOSP health HAL, sysfs label
-in `sepolicy/genfs_contexts`. Tested 2026-10-18 on the nio with PixelOS: Android's battery service (`dumpsys battery`) shows the
-phone's live level, charging status, AC power, voltage and temperature, the same as the host's power_supply,
-and follows changes (27 % → 29 % while charging). A second reader on the socket gets the same lines alongside
-the VM. Two VMs running at once is not tested yet.
-
-**Gaps (fix before 2026.1):**
-- The sysfs label (`genfs_contexts`) names the device's MMIO address (`20e9000`), which comes from crosvm's
-  allocation. A different device set or crosvm version can move it. The guest runs Permissive today, so a
-  move would go unnoticed until it runs Enforcing.
-- The gfxstream fallback (Cuttlefish's crosvm) has no `mship` monitor, so that path has no battery slot.
-- Caps aren't published (no broker `list-handles` yet).
+in `sepolicy/genfs_contexts`.

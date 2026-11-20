@@ -1,8 +1,8 @@
 # mship.fingerprint 1.x
 
-Status: **design only.** Not in the registry, no host service and no hardware item yet; the host side so far is
-the nio bring-up tool `fpc-test` (`crates/mship-devices/src/bin/fpc_test.rs`). Template storage needs the auth-token
-design below first.
+- **Not implemented:** design only. Not in the registry, no host service and no hardware group; the only host code
+  is the nio bring-up tool `fpc-test` (`crates/mship-devices/src/bin/fpc_test.rs`). Template storage needs the
+  auth-token design below first.
 
 A fingerprint reader for one VM at a time. Handle `fingerprint:0`, group `fingerprint`, sharing `exclusive`:
 enrolled fingers are sensitive, so only the VM that holds the handle can enrol or match, and the host runs the

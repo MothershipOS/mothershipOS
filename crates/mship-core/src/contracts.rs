@@ -41,6 +41,8 @@ pub const CONTRACTS: Table = &[
     ("mship.modem", &[Entry::new("1.0", "2026.1")]),
     ("mship.camera", &[Entry::new("1.0", "2026.1")]),
     ("mship.audio", &[Entry::new("1.0", "2026.1")]),
+    ("mship.gnss", &[Entry::new("1.0", "2026.1")]),
+    ("mship.sensors", &[Entry::new("1.0", "2026.1")]),
 ];
 
 pub const PLATFORMS: Table = &[

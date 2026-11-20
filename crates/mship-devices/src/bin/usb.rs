@@ -19,7 +19,8 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use mship_devices::{for_session, fresh, log, poll, rd, read_uevent, uevents};
+use mship_core::handle::{Direction, Handle};
+use mship_devices::{for_session, fresh, log, poll, publish_handles, rd, read_uevent, uevents};
 use serde::Serialize;
 use serde_json::json;
 
@@ -329,6 +330,7 @@ fn serve() -> std::io::Result<()> {
     fresh(Path::new(CTL));
     let ctl = UnixDatagram::bind(CTL)?;
     for_session(Path::new(CTL), 0o660);
+    publish_handles("usb", &[Handle::new("usb:host", "mship.usb", "USB devices", "media-removable-symbolic", Direction::Both, "usb").control(CTL, None)]);
     log(format!("serving {CTL}; {} USB devices, lent to {}", devices().len(), s.owner.as_deref().unwrap_or("nobody")));
     loop {
         let mut fds = vec![ctl.as_raw_fd()];

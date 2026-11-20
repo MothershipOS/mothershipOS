@@ -45,3 +45,11 @@ pub fn fresh(path: &Path) {
 pub fn rd(path: impl AsRef<Path>) -> String {
     std::fs::read_to_string(path).map(|s| s.trim().to_string()).unwrap_or_default()
 }
+
+/// Publish the handles this service serves (mship_core::handle): mothershipd discovers and lends them. A failure is
+/// logged (the service keeps running; its hardware just isn't offered).
+pub fn publish_handles(service: &str, handles: &[mship_core::handle::Handle]) {
+    if let Err(e) = mship_core::handle::publish(service, handles) {
+        log(format!("handles: {e}"));
+    }
+}

@@ -10,6 +10,7 @@
 mod android;
 mod linux;
 mod seed;
+mod slots;
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -231,9 +232,18 @@ fn serve_jack_switches(vm: &Vm, jacks: &Path) -> Res<PathBuf> {
 
 /// The host Venus decoder (by name: its /dev/videoN index changes between boots).
 pub fn venus_decoder() -> Option<String> {
+    video_node("qcom-venus-decoder")
+}
+
+/// The host's Venus encoder (mship.video, hardware video encode).
+pub fn venus_encoder() -> Option<String> {
+    video_node("qcom-venus-encoder")
+}
+
+fn video_node(card: &str) -> Option<String> {
     std::fs::read_dir("/sys/class/video4linux").ok()?.flatten().find_map(|v| {
         let name = std::fs::read_to_string(v.path().join("name")).ok()?;
-        (name.trim() == "qcom-venus-decoder").then(|| format!("/dev/{}", v.file_name().to_string_lossy()))
+        (name.trim() == card).then(|| format!("/dev/{}", v.file_name().to_string_lossy()))
     })
 }
 

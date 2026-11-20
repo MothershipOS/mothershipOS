@@ -1,48 +1,37 @@
 //! Hardware handover: lend hardware to VMs, take it back.
 //!
-//! Every piece of hardware has one assigned owner (mothershipOS or a VM) in /var/lib/mothership/config/hardware.json
-//! (Settings › Hardware). Assigned hardware is lent automatically: screen hardware (display, buttons) while the VM
-//! is shown, network hardware (wifi-2g, wifi-5g, internet), bluetooth, usb, cellular, cameras, speaker, earpiece, headset, microphone and display-ext while it
-//! runs.
+//! What there is comes from the handle registry (`handles`): every assignable group has one assigned owner
+//! (mothershipOS or a VM) in /var/lib/mothership/config/hardware.json (Settings › Hardware), and is lent the way its
+//! handles say: with the screen (`while_shown`: they move with the shown VM) or while the VM runs. A group whose
+//! handles have a control socket is lent through it (`attach <vm> [arg]`, `detach <vm> <reason> [arg]`); handles
+//! every VM gets (`every_vm`) need no handover.
 //!
-//! display = panel + touchscreen. VMs with "display_mode": "lease" (crosvm + mship-vm-display) get the panel
-//! itself: sway leases the DSI connector to the VM's presenter (`swaymsg lease_output DSI-1 on`) and gets it back
-//! on take. Other VMs: their window fullscreen at scale 1. Either way the host idle timeout is off while a VM has
-//! the display, and touch goes to the VM (its input bridge, `<vm dir>/input.ctl`). buttons = volume keys.
-//! wifi-2g / wifi-5g = one Wi-Fi band (mship.wifi, mship-wifi-bridge). internet = shared internet (the phone's
-//! uplink NATed to the VM). bluetooth (mship.bt, mship-bt-bridge), usb (mship.usb, mship-usb), cellular (mship.modem,
-//! mship-modem: the modem with its SIM, calls, SMS and mobile data), cameras (mship.camera, mship-camera:
-//! every camera), speaker, earpiece, headset and microphone (mship.audio, mship-audio: the phone's audio devices, each
-//! its own stream in the guest). display-ext = the
-//! USB-C external display (DP-1), leased to the VM's presenter; sway itself never uses it.
+//! mothershipd lends the session's groups itself: display = panel + touchscreen + power key. VMs with
+//! "display_mode": "lease" (crosvm + mship-vm-display) get the panel itself: sway leases the DSI connector to the VM's
+//! presenter (`swaymsg lease_output DSI-1 on`) and gets it back on take. Other VMs: their window fullscreen at scale
+//! 1. Either way the host idle timeout is off while a VM has the display, and touch goes to the VM (its input bridge,
+//! `<vm dir>/input.ctl`). buttons = volume keys. internet = shared internet (the phone's uplink NATed to the VM).
+//! display-ext = the USB-C external display (DP-1), leased to the VM's presenter; sway itself never uses it.
 
 use std::collections::BTreeMap;
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use mship_core::api::{HandoverState, ITEMS, SCREEN_ITEMS};
+use mship_core::api::HandoverState;
+use mship_core::handle::Lend;
 use mship_host::util::{Result, fail, load_value};
 use mship_host::{vm, wifi};
 
+use crate::handles::Registry;
 use crate::session;
 
 const OUT: &str = "DSI-1";
 const SESSION_SCALE: &str = "2";
 /// display-ext: leased to a VM, never sway's
 const EXT_OUT: &str = "DP-1";
-/// closed when their VM stops
-const NETWORK: &[&str] = &["internet", "display-ext", "bluetooth", "usb", "wifi-2g", "wifi-5g", "cellular", "cameras", "speaker", "earpiece", "headset", "microphone"];
-const BANDS: &[(&str, &str)] = &[("wifi-2g", "2g"), ("wifi-5g", "5g")];
 const ASSOC: &str = "/var/lib/mothership/config/hardware.json";
-const WIFI_BRIDGE: &str = "/run/mothership/wifi-bridge.sock";
-/// (item, the device service's control socket, the handle within that service: appended to attach/detach)
-const BRIDGES: &[(&str, &str, &str)] =
-    &[("bluetooth", "/run/mothership/bt-bridge.sock", ""), ("usb", "/run/mothership/usb.sock", ""),
-      ("cellular", "/run/mothership/modem.sock", ""), ("cameras", "/run/mothership/camera.sock", ""),
-      ("speaker", "/run/mothership/audio.sock", "speaker"), ("earpiece", "/run/mothership/audio.sock", "earpiece"),
-      ("headset", "/run/mothership/audio.sock", "headset"), ("microphone", "/run/mothership/audio.sock", "mic")];
 /// a repeated toggle (key bounce, re-announced key state) is ignored
 const DEBOUNCE: Duration = Duration::from_millis(1500);
 /// private: who holds what, for mothershipd's own restart only
@@ -50,10 +39,6 @@ const RECOVER: &str = "/run/mothership/handover.recover";
 
 fn conf(d: &Path) -> serde_json::Value {
     load_value(d.join("vm.json")).unwrap_or_default()
-}
-
-fn cid(d: &str) -> u64 {
-    conf(Path::new(d))["cid"].as_u64().unwrap_or(0)
 }
 
 fn leased(d: &str) -> bool {
@@ -102,33 +87,86 @@ struct Inner {
 
 pub struct Handover {
     inner: Mutex<Inner>,
+    reg: Arc<Registry>,
     publish: Box<dyn Fn(HandoverState) + Send + Sync>,
 }
 
+/// who holds a group now ("host" | VM dir)
+fn holder(i: &Inner, item: &str) -> String {
+    i.st.get(item).cloned().unwrap_or_else(|| "host".into())
+}
+
 impl Handover {
-    pub fn new(publish: impl Fn(HandoverState) + Send + Sync + 'static) -> Self {
-        let mut st: BTreeMap<String, String> = ITEMS.iter().map(|i| (i.to_string(), "host".to_string())).collect();
+    pub fn new(reg: Arc<Registry>, publish: impl Fn(HandoverState) + Send + Sync + 'static) -> Self {
+        let mut st: BTreeMap<String, String> = reg.groups().into_iter().map(|g| (g.name, "host".to_string())).collect();
         if let Some(old) = load_value(RECOVER).and_then(|v| serde_json::from_value::<BTreeMap<String, String>>(v).ok()) {
             for (i, d) in old {
-                if st.contains_key(&i) && (d == "host" || vm::running(Path::new(&d))) {
+                if d == "host" || vm::running(Path::new(&d)) {
                     st.insert(i, d);
                 }
             }
         }
-        Self { inner: Mutex::new(Inner { st, resume: None, changed_at: None }), publish: Box::new(publish) }
+        Self { inner: Mutex::new(Inner { st, resume: None, changed_at: None }), reg, publish: Box::new(publish) }
+    }
+
+    fn all(&self) -> Vec<String> {
+        self.reg.groups().into_iter().map(|g| g.name).collect()
     }
 
     // ------------------------------------------------ the assignment map (a setting: kept in a file)
-    /// {item: "host" | VM name}
+    /// {group: "host" | VM name}, for every group there is now (an assignment of a group that is gone is kept in
+    /// the file for when it comes back)
     pub fn assoc(&self) -> BTreeMap<String, String> {
         let a: BTreeMap<String, String> =
             load_value(ASSOC).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
-        ITEMS.iter().map(|i| (i.to_string(), a.get(*i).cloned().unwrap_or_else(|| "host".into()))).collect()
+        self.all().into_iter().map(|g| { let o = a.get(&g).cloned().unwrap_or_else(|| "host".into()); (g, o) }).collect()
     }
 
-    fn assoc_save(&self, a: &BTreeMap<String, String>) -> Result<()> {
+    /// The registry changed or device services (re)started: hardware is hot-plugged. Every group assigned to a
+    /// running VM is lent now if it may be (screen groups only to the shown VM): one whose service just appeared, and
+    /// again one whose service restarted (the new process doesn't know it was lent).
+    pub fn handles_changed(&self, started: &[String]) {
+        let mut i = self.inner.lock().unwrap();
+        let all = self.all();
+        for g in &all {
+            i.st.entry(g.clone()).or_insert_with(|| "host".into());
+        }
+        // a group whose service went away is held by nobody (it comes back to its assigned VM with the service)
+        for (g, h) in i.st.iter_mut() {
+            if !all.contains(g) && *h != "host" {
+                println!("handover: {g} unplugged from {} (its service is gone)", base(h));
+                *h = "host".into();
+            }
+        }
+        let shown = holder(&i, "display");
+        let mut lend: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (g, owner) in self.assoc() {
+            if owner == "host" {
+                continue;
+            }
+            let d = Path::new(vm::VMS).join(&owner);
+            let d = d.canonicalize().unwrap_or(d).to_string_lossy().into_owned();
+            let Some(group) = self.reg.group(&g) else { continue };
+            if !vm::running(Path::new(&d)) || (group.lend == Lend::WhileShown && shown != d) {
+                continue;
+            }
+            let restarted = self.reg.services(&g).iter().any(|s| started.contains(s));
+            if holder(&i, &g) != d || restarted {
+                lend.entry(d).or_default().push(g);
+            }
+        }
+        for (d, groups) in lend {
+            println!("handover: hot-plugging {} into {}", groups.join(", "), base(&d));
+            self.give_locked(&mut i, Path::new(&d), Some(groups));
+        }
+        self.done(&mut i);
+    }
+
+    fn assoc_save(&self, new: &BTreeMap<String, String>) -> Result<()> {
+        let mut a: BTreeMap<String, String> = load_value(ASSOC).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+        a.extend(new.clone());
         let tmp = format!("{ASSOC}.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(a).unwrap())?;
+        std::fs::write(&tmp, serde_json::to_string_pretty(&a).unwrap())?;
         let (uid, gid) = session::user();
         std::os::unix::fs::chown(&tmp, Some(uid), Some(gid))?;
         std::fs::rename(&tmp, ASSOC)?;
@@ -185,27 +223,22 @@ impl Handover {
 
     // ------------------------------------------------ transitions
     fn take_locked(&self, i: &mut Inner, items: &[&str]) -> BTreeMap<String, String> {
-        let prev = i.st["display"].clone();
-        for item in items {
-            let holder = i.st[*item].clone();
-            if holder == "host" {
-                continue;
-            }
+        let prev = holder(i, "display");
+        let items: Vec<&str> = items.iter().copied().filter(|it| holder(i, it) != "host").collect();
+        for item in &items {
+            let holder = holder(i, item);
             match *item {
                 "internet" => {
                     let _ = wifi::owner_set("wifi", "host");
                 }
-                b if BANDS.iter().any(|(n, _)| *n == b) => {
-                    bridge(&format!("detach {} user", cid(&holder)), WIFI_BRIDGE);
-                }
-                b if BRIDGES.iter().any(|(n, _, _)| *n == b) => {
-                    let (_, path, handle) = BRIDGES.iter().find(|(n, _, _)| *n == b).unwrap();
-                    bridge(format!("detach {} user {handle}", base(&holder)).trim_end(), path);
-                }
                 "display-ext" => {
                     session::sway(&["lease_output", EXT_OUT, "off"]); // revokes only this output's lease
                 }
-                _ => {}
+                g => {
+                    for (sock, arg) in self.reg.controls(g) {
+                        bridge(format!("detach {} user {}", base(&holder), arg.unwrap_or_default()).trim_end(), &sock);
+                    }
+                }
             }
             ctl(&holder, &format!("{item} off"));
             if *item == "display" {
@@ -216,7 +249,9 @@ impl Handover {
         if items.contains(&"display") {
             Self::show_host((prev != "host").then_some(prev.as_str()));
         }
-        println!("handover: took {}", items.join(", "));
+        if !items.is_empty() {
+            println!("handover: took {}", items.join(", "));
+        }
         self.done(i)
     }
 
@@ -232,21 +267,14 @@ impl Handover {
             self.assoc().into_iter().filter(|(_, owner)| *owner == name).map(|(i, _)| i).collect()
         });
         for item in &items {
-            let holder = i.st[item].clone();
+            let holder = holder(i, item);
             let item = item.as_str();
+            if self.reg.group(item).is_none() {
+                continue; // its service isn't running (the assignment stays for when it is)
+            }
             if item == "internet" {
                 if holder != d && wifi::owner_set("wifi", &format!("vm:{d}")).is_ok() {
                     i.st.insert(item.into(), d.clone()); // replaces any other VM's NAT
-                }
-                continue;
-            }
-            if let Some((_, band)) = BANDS.iter().find(|(n, _)| *n == item) {
-                if holder != "host" && holder != d {
-                    bridge(&format!("detach {} revoked", cid(&holder)), WIFI_BRIDGE);
-                }
-                let c = cid(&d);
-                if c != 0 && bridge(&format!("attach {c} {band}"), WIFI_BRIDGE) {
-                    i.st.insert(item.into(), d.clone()); // kept until the VM's driver connects
                 }
                 continue;
             }
@@ -258,11 +286,17 @@ impl Handover {
                 i.st.insert(item.into(), d.clone());
                 continue;
             }
-            if let Some((_, path, handle)) = BRIDGES.iter().find(|(n, _, _)| *n == item) {
-                if holder != "host" && holder != d {
-                    bridge(format!("detach {} revoked {handle}", base(&holder)).trim_end(), path);
+            let controls = self.reg.controls(item);
+            if !controls.is_empty() {
+                let mut lent = false;
+                for (sock, arg) in controls {
+                    let arg = arg.unwrap_or_default();
+                    if holder != "host" && holder != d {
+                        bridge(format!("detach {} revoked {arg}", base(&holder)).trim_end(), &sock);
+                    }
+                    lent |= bridge(format!("attach {name} {arg}").trim_end(), &sock);
                 }
-                if bridge(format!("attach {name} {handle}").trim_end(), path) {
+                if lent {
                     i.st.insert(item.into(), d.clone()); // kept until the VM is up
                 }
                 continue;
@@ -288,19 +322,17 @@ impl Handover {
 
     /// New owner for one piece of hardware; lent right away if that VM is running (and shown, for screen hardware).
     pub fn assign(&self, item: &str, owner: &str) -> Result<BTreeMap<String, String>> {
-        if !ITEMS.contains(&item) {
-            return fail(format!("item must be one of {}", ITEMS.join(", ")));
-        }
+        let Some(group) = self.reg.group(item) else {
+            return fail(format!("no hardware group {item:?} (there are: {})", self.all().join(", ")));
+        };
         let mut i = self.inner.lock().unwrap();
-        let mut a = self.assoc();
-        a.insert(item.into(), owner.into());
-        self.assoc_save(&a)?;
-        if i.st[item] != "host" && base(&i.st[item]) != owner {
+        self.assoc_save(&BTreeMap::from([(item.to_string(), owner.to_string())]))?;
+        if holder(&i, item) != "host" && base(&holder(&i, item)) != owner {
             self.take_locked(&mut i, &[item]);
         }
         let d = Path::new(vm::VMS).join(owner);
-        let shown = i.st["display"] == d.canonicalize().unwrap_or(d.clone()).to_string_lossy();
-        if owner != "host" && vm::running(&d) && (!SCREEN_ITEMS.contains(&item) || shown) {
+        let shown = holder(&i, "display") == d.canonicalize().unwrap_or(d.clone()).to_string_lossy();
+        if owner != "host" && vm::running(&d) && (group.lend != Lend::WhileShown || shown) {
             self.give_locked(&mut i, &d, Some(vec![item.into()]));
         }
         Ok(self.done(&mut i))
@@ -324,19 +356,36 @@ impl Handover {
         if i.changed_at.is_some_and(|t| t.elapsed() < DEBOUNCE) {
             return i.st.clone(); // key bounce, re-announced key state
         }
-        if i.st["display"] != "host" {
-            return self.take_locked(&mut i, SCREEN_ITEMS);
+        if holder(&i, "display") != "host" {
+            let screen = self.reg.screen_groups();
+            return self.take_locked(&mut i, &screen.iter().map(String::as_str).collect::<Vec<_>>());
         }
         match vm::running_dirs().first() {
             Some(d) => self.give_locked(&mut i, d, None),
-            None => self.take_locked(&mut i, ITEMS),
+            None => {
+                let all = self.all();
+                self.take_locked(&mut i, &all.iter().map(String::as_str).collect::<Vec<_>>())
+            }
         }
+    }
+
+    /// The screen's groups back to mothershipOS.
+    pub fn take_screen(&self) -> BTreeMap<String, String> {
+        let screen = self.reg.screen_groups();
+        self.take(&screen.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    /// Everything (or the named groups) back to mothershipOS.
+    pub fn take_named(&self, items: &[String]) -> BTreeMap<String, String> {
+        let all = self.all();
+        let items: Vec<&str> = all.iter().map(String::as_str).filter(|g| items.is_empty() || items.iter().any(|x| x == g)).collect();
+        self.take(&items)
     }
 
     /// The power key: pause/resume the VM's touch while the panel is off.
     pub fn screen(&self, on: bool) -> BTreeMap<String, String> {
         let mut i = self.inner.lock().unwrap();
-        let shown = i.st["display"].clone();
+        let shown = holder(&i, "display");
         if !on && shown != "host" && leased(&shown) {
             // sway can only switch the panel off while it has it: take it back, re-lend on screen on
             i.resume = Some(shown);
@@ -358,10 +407,11 @@ impl Handover {
     /// VMs that stopped without giving their hardware back: close network hardware now, forget the rest.
     pub fn tick(&self) {
         let mut i = self.inner.lock().unwrap();
-        let gone: Vec<&str> = NETWORK
+        let running_groups: Vec<String> = self.reg.groups().into_iter().filter(|g| g.lend == Lend::WhileRunning).map(|g| g.name).collect();
+        let gone: Vec<&str> = running_groups
             .iter()
-            .copied()
-            .filter(|item| i.st[*item] != "host" && !vm::running(Path::new(&i.st[*item])))
+            .map(String::as_str)
+            .filter(|item| holder(&i, item) != "host" && !vm::running(Path::new(&holder(&i, item))))
             .collect();
         if !gone.is_empty() {
             self.take_locked(&mut i, &gone);

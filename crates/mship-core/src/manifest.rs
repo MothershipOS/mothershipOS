@@ -12,9 +12,10 @@ use serde_json::{Map, Value};
 use crate::contracts::{CURRENT_SCHEMA, MANIFEST_SCHEMAS, contract_support, platform_support};
 use crate::version::Release;
 
-/// What the user lends (the handover checklist). wifi-any = single-band radios (no per-band handles).
+/// Schema 1's handover vocabulary (frozen with the schema: what V1 manifests may list). The running system's groups come
+/// from the handle registry (mothershipd, `handles.list`), not from here. wifi-any = single-band radios.
 pub const GROUPS: &[&str] =
-    &["display", "buttons", "wifi-2g", "wifi-5g", "wifi-any", "internet", "bluetooth", "usb", "display-ext", "cellular", "cameras", "speaker", "earpiece", "headset", "microphone"];
+    &["display", "buttons", "wifi-2g", "wifi-5g", "wifi-any", "internet", "bluetooth", "usb", "display-ext", "cellular", "cameras", "speaker", "earpiece", "headset", "microphone", "location"];
 
 /// schema N -> a function turning an N manifest into the N+1 shape. Empty while schema 1 is the only one.
 pub type Migration = fn(Value) -> Value;

@@ -4,6 +4,18 @@ Native Bluetooth: the guest's own Bluetooth stack (pairing, profiles, settings U
 controller at the HCI level. The host keeps the transport driver, firmware download, BD address and power.
 Handle: `bt:hci0` (group `bluetooth`), exclusive: while a VM holds it, the host has no Bluetooth.
 
+- **Works:** in PixelOS (QCA6390 over UART), Android turns Bluetooth on with the phone's address and discovers
+  nearby devices. Release gives BlueZ the controller back, powered; re-attach brings Android's Bluetooth back on
+  without user action. The group can be lent and taken back while the VM runs, and a bridge that starts after the
+  VM or restarts while it runs reaches the guest without a VM restart.
+- **Needs work:**
+  - Pairing and profiles (A2DP, HFP, LE Audio, HID) are untested. SCO over HCI depends on the controller's
+    routing. Voice paths routed to PCM/I2S stay with the host's audio.
+  - Pairing keys are per side: devices paired with the host don't work in the VM and vice versa (both use the
+    same address, so a remote may try the other side's keys and fail until re-paired).
+  - The QCA firmware is downloaded again on every attach and release (~1.1 s), because the kernel re-runs the
+    driver's setup when the user channel opens.
+
 ## Guest view
 - **Transport:** one virtio-console port (the platform says which; `cuttlefish-arm64`: port 5, `/dev/hvc5`)
   carries HCI packets in H4 framing: a packet indicator byte (1 command, 2 ACL, 3 SCO, 4 event, 5 ISO)
@@ -36,21 +48,8 @@ guest reads the same values from the controller.
 
 **History:** 1.0 (2026.1) initial.
 
-**Implementation:** host `mship-bt-bridge` (`crates/mship-devices/src/bin/bt.rs`, `mship-bt-bridge.service`): an `HCI_CHANNEL_USER` socket on
-`hci0` while attached, the guest's stream on `/run/mothership/bt/<vm>.sock` (crosvm `unix-stream` serial),
-control socket `/run/mothership/bt-bridge.sock` (`attach <vm>`, `detach <vm> [reason]`, `status`) used by
-mothershipd (hardware item `bluetooth`, lent while the VM runs). Tested 2026-10-18 on the nio with PixelOS
-(QCA6390 over UART): Android turns Bluetooth on with the phone's address and discovers nearby devices.
-Release gives BlueZ the controller back, powered; re-attach brings Android's Bluetooth back on without user
-action.
-
-**Gaps (fix before 2026.1):**
-- Pairing and profiles (A2DP, HFP, LE Audio, HID) are not tested. SCO over HCI depends on the controller's
-  routing. Voice paths routed to PCM/I2S stay with the host's audio (needs `mship.audio`).
-- The caps aren't published (no broker `list-handles` yet).
-- Pairing keys are per side: devices paired with the host don't work in the VM and vice versa (both use the
-  same address, so a remote may try the other side's keys and fail until re-paired).
-- If the bridge restarts while a VM runs, crosvm doesn't reconnect the console. The VM's Bluetooth stays empty
-  until the VM restarts.
-- The QCA firmware is downloaded again on every attach and release (~1.1 s), because the kernel re-runs the
-  driver's setup when the user channel opens.
+**Implementation:** host `mship-bt-bridge` (`crates/mship-devices/src/bin/bt.rs`, `mship-bt-bridge.service`): an
+`HCI_CHANNEL_USER` socket on `hci0` while attached; the guest's stream on `/run/mothership/bt/<vm>.sock`, which
+`mship-launch` relays to crosvm's console socket `<vm dir>/slot-bt.sock` for the VM's whole life
+(`crates/mship-launch/src/slots.rs`); control socket `/run/mothership/bt-bridge.sock` (`attach <vm>`,
+`detach <vm> [reason]`, `status`) used by mothershipd (group `bluetooth`, lent while the VM runs).

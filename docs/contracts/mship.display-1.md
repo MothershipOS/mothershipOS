@@ -1,5 +1,14 @@
 # mship.display 1.x
 
+- **Works:** a DRM lease of the panel (PixelOS) or the USB-C external display (Ubuntu desktop) with the guest's
+  buffers scanned out zero-copy.
+- **Needs work:**
+  - While empty, the presenter (`mship-presenter`) completes frame callbacks immediately (unthrottled), instead of
+    at the nominal rate.
+  - `efi-virt-arm64` gets the external display (`display:dp0`, group `display-ext`) hot-plugged at the monitor's
+    preferred mode: the display appears and disappears with the monitor, which 1.0 (a fixed mode for the VM's
+    lifetime) doesn't describe.
+
 **Guest view:** one virtio-gpu device with one scanout (display 0).
 - The scanout mode is the panel's: width × height px, refresh rate, DPI (`caps`). It never changes while the VM
   runs.
@@ -16,10 +25,3 @@
 **Empty:** frames are accepted and dropped, pacing continues at the nominal rate.
 
 **History:** 1.0 (2026.1) initial.
-
-**Gaps in the current implementation (fix before 2026.1):**
-- While empty, the presenter (`mship-presenter`) completes frame callbacks immediately (unthrottled), instead of
-  at the nominal rate.
-- `efi-virt-arm64` gets the external display (`display:dp0`, group `display-ext`) hot-plugged at the monitor's
-  preferred mode: the display appears and disappears with the monitor, which 1.0 (a fixed mode for the VM's
-  lifetime) doesn't describe.

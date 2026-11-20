@@ -26,14 +26,10 @@ pub enum Topic {
     Handover,
     Host,
     Cpu,
+    Handles,
 }
 
-pub const TOPICS: &[Topic] = &[Topic::Power, Topic::Vms, Topic::Handover, Topic::Host, Topic::Cpu];
-
-/// Hardware a VM can be given (Settings › Hardware).
-pub const ITEMS: &[&str] = &["display", "buttons", "wifi-2g", "wifi-5g", "internet", "bluetooth", "usb", "display-ext", "cellular", "cameras", "speaker", "earpiece", "headset", "microphone"];
-/// lent while the VM is shown; the rest while it runs
-pub const SCREEN_ITEMS: &[&str] = &["display", "buttons"];
+pub const TOPICS: &[Topic] = &[Topic::Power, Topic::Vms, Topic::Handover, Topic::Host, Topic::Cpu, Topic::Handles];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op")]
@@ -78,7 +74,9 @@ pub enum Op {
     #[serde(rename = "vm.display")]
     VmDisplay { vm: String, on: bool },
 
-    // hardware handover
+    // hardware handles and their handover
+    #[serde(rename = "handles.list")]
+    HandlesList,
     #[serde(rename = "handover.status")]
     HandoverStatus,
     #[serde(rename = "handover.assoc")]
@@ -409,6 +407,36 @@ pub struct StoreStatus {
 pub struct HandoverState {
     pub holders: BTreeMap<String, String>,
     pub assoc: BTreeMap<String, String>,
+}
+
+/// Topic `handles` / `handles.list`: every handle mothershipOS knows (discovered from the device services and its own),
+/// and the groups the user assigns, in display order.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HandleList {
+    pub handles: Vec<HandleInfo>,
+    pub groups: Vec<GroupInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HandleInfo {
+    /// who publishes it ("mothershipd" for the built-in ones)
+    pub service: String,
+    #[serde(flatten)]
+    pub handle: crate::handle::Handle,
+}
+
+/// An assignable group: what the user gives a VM (its handles move together).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupInfo {
+    pub name: String,
+    pub label: String,
+    pub icon: String,
+    pub lend: crate::handle::Lend,
+    pub summary: String,
+    /// the handle ids in it
+    pub handles: Vec<String>,
+    /// false while none of its handles' hardware is there
+    pub present: bool,
 }
 
 /// vm.show's answer when there is nothing to switch.

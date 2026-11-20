@@ -23,7 +23,8 @@ use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use mship_devices::{for_session, fresh, log, poll};
+use mship_core::handle::{Direction, Handle};
+use mship_devices::{for_session, fresh, log, poll, publish_handles};
 use serde_json::json;
 
 const CONF: &str = "/etc/mothership/bt-bridge.json";
@@ -399,6 +400,9 @@ fn serve() -> std::io::Result<()> {
     fresh(Path::new(CTL));
     let ctl = UnixDatagram::bind(CTL)?;
     for_session(Path::new(CTL), 0o660);
+    publish_handles("bt-bridge", &[Handle::new(&format!("bt:hci{hci_dev}"), "mship.bt", "Bluetooth", "bluetooth-active-symbolic", Direction::Both, "bluetooth")
+        .caps(json!({"transport": "h4"}))
+        .control(CTL, None)]);
     log(format!("serving hci{hci_dev} for {} VMs in {SOCKS}", b.guests.len()));
     let mut last = Instant::now();
     loop {

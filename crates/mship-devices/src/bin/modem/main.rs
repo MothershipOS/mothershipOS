@@ -34,7 +34,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use mship_devices::qrtr::{PORT_CTRL, QmiClient, QmiMsg, Qrtr, ctrl, ctrl_packet, tlv, tlv_u8, tlv_u32};
-use mship_devices::{for_session, fresh, log, poll, read_uevent, uevents};
+use mship_core::handle::{Direction, Handle};
+use mship_devices::{for_session, fresh, log, poll, publish_handles, read_uevent, uevents};
 use serde_json::{Value, json};
 
 const CONF: &str = "/etc/mothership/modem.json";
@@ -938,6 +939,9 @@ fn serve() -> std::io::Result<()> {
     fresh(Path::new(CTL));
     let ctl = UnixDatagram::bind(CTL)?;
     for_session(Path::new(CTL), 0o660);
+    publish_handles("modem", &[Handle::new("modem:0", "mship.modem", "Mobile network (SIM, calls, data)", "network-cellular-symbolic", Direction::Both, "cellular")
+        .caps(json!({"at": "3gpp-27.007", "data": ["ipv4"], "voice": "signalling"}))
+        .control(CTL, None)]);
     loop {
         let mut fds = vec![ctl.as_raw_fd(), m.ns.fd(), uev.as_raw_fd(), m.at.listener_fd()];
         fds.extend(tftp.fds());

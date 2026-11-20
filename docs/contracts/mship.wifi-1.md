@@ -5,6 +5,24 @@ station interface of the phone, restricted to the bands the VM holds. The host k
 regulatory domain and radio power. Handles: one per band (`wifi:2g`, `wifi:5g`) on radios that can run two
 stations on two channels, otherwise one `wifi:any`.
 
+- **Works** (while the firmware runs): in PixelOS: scan shows only the attached band; WPA2-PSK connect with the guest's supplicant; DHCP from
+  the real LAN; MAC randomization followed by the host; release (deauth, guest disconnected, interface down) and
+  re-attach (the guest reconnects in ~3 s). A band is hot-plugged: lent to and taken from a running VM (the bridge
+  attaches the band's interface to the VM's tap, and releases it).
+- **Broken:** recovery from a firmware crash. The QCA6390 firmware can crash during a connection
+  (`firmware crashed: MHI_CB_EE_RDDM` after `Failed to add peer` in the kernel log) and ath11k does not recover it;
+  reloading `ath11k_pci` does not bring the firmware back (it stops after `qca6390 hw2.0`), only a reboot does. Until
+  then neither the host nor a VM has Wi-Fi, and lending a band fails (`ip link set dev mshw5g up: ... transport
+  endpoint shutdown`).
+- **Needs work:**
+  - One band per VM at a time (two station interfaces with the same MAC aren't allowed by mac80211; needs
+    per-connection interface switching).
+  - `hello` carries no host capabilities: the guest advertises PMF-optional and a fixed cipher list; the bridge maps
+    PMF-optional to no PMF when the host wiphy lacks it (PMF-required networks fail).
+  - No rfkill state: an unattached band is only disabled channels. The host's regulatory domain isn't forwarded
+    (`regdom`); the guest uses its own permissive "99" domain.
+- **Not implemented:** WPA3-SAE (1.1).
+
 ## Guest view
 - **Data:** one virtio-net device (the platform says which) carries the band interface's Ethernet II frames
   unchanged, including EAPOL (0x888e). The device's MAC starts with `02:6d:73` (the guest driver finds its
@@ -69,16 +87,4 @@ The bands listed are those the host could ever attach to this slot (fixed for th
 
 **Implementation:** guest `guest/drivers/mship_wifi/` (built for the Android GKI 6.12.38-android16-5 and loaded
 from the first-stage ramdisk, `pixelOS_16_VM`'s `cargo xtask android-initrd`), host `crates/mship-devices`
-(`mship-wifi-bridge`, `mship-wifi-bridge.service`); bands are lent by mothershipd (hardware items `wifi-2g`,
-`wifi-5g`). Tested 2026-10-13 on the nio with PixelOS: scan shows only the attached band, WPA2-PSK
-connect with the guest's supplicant, DHCP from the real LAN, MAC randomization followed by the host, release
-(deauth, guest disconnected, interface down) and re-attach (guest reconnects in ~3 s).
-
-**Gaps (fix before 2026.1):**
-- One band per VM at a time (two station interfaces with the same MAC aren't allowed by mac80211; needs
-  per-connection interface switching).
-- `hello` carries no host capabilities: the guest advertises PMF-optional and a fixed cipher list; the bridge maps
-  PMF-optional to no PMF when the host wiphy lacks it (PMF-required networks fail).
-- No rfkill state: an unattached band is only disabled channels; the host's regulatory domain isn't forwarded
-  (`regdom`); the guest uses its own permissive "99" domain.
-- WPA3-SAE (1.1).
+(`mship-wifi-bridge`, `mship-wifi-bridge.service`); bands are lent by mothershipd (groups `wifi-2g`, `wifi-5g`).

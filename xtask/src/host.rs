@@ -5,6 +5,8 @@
 //!   and sway-mship (sway 1.11 with sway-patches: the lease_output command), built against Ubuntu's wlroots headers
 //!   (same features, checked) and run on ours (mship-sway.service.d/lease.conf)
 //! - `vhost-sound` (host/vm-sound): vhost-device-sound, the VMs' virtio-snd backend (ALSA), with our patches
+//! - `hexagonrpc` (host/hexagonrpc): hexagonrpcd, the FastRPC file server of the SLPI's sensor process, with our patches
+//!   (a writable registry), static
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -82,4 +84,19 @@ pub fn vhost_sound() -> Result<PathBuf> {
         .status()?;
     ensure!(st.success(), "{name}: cargo build failed");
     Ok(work.join("target").join(TARGET).join("release").join(name))
+}
+
+/// hexagonrpcd, statically linked (its library built in).
+pub fn hexagonrpcd() -> Result<PathBuf> {
+    let s = source_json("host/hexagonrpc")?;
+    let work = target_dir().join("hexagonrpc");
+    let cross = meson_cross(&work)?;
+    let tree = unpacked(&s, "hexagonrpc", &work, &root().join("host/hexagonrpc/patches"))?;
+    let st = Command::new("meson")
+        .current_dir(&tree)
+        .args(["setup", "build", "--cross-file", &cross.to_string_lossy(), "--buildtype=release", "-Ddefault_library=static"])
+        .status()?;
+    ensure!(st.success(), "hexagonrpc: meson setup failed");
+    run_in(&tree, &["ninja", "-C", "build", "hexagonrpcd/hexagonrpcd"])?;
+    Ok(tree.join("build/hexagonrpcd/hexagonrpcd"))
 }

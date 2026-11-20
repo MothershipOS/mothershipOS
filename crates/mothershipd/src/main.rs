@@ -8,6 +8,7 @@
 
 mod api;
 mod cpuguard;
+mod handles;
 mod handover;
 mod hub;
 mod pool;
@@ -33,6 +34,7 @@ pub struct Daemon {
     pub guard: Mutex<cpuguard::CpuGuard>,
     pub power: Arc<power::Power>,
     pub handover: Arc<handover::Handover>,
+    pub handles: Arc<handles::Registry>,
     pub vms: Arc<vms::Vms>,
     pub pool: Arc<pool::Pool>,
     host_kick: (Mutex<bool>, Condvar),
@@ -59,8 +61,11 @@ impl Daemon {
             let v = serde_json::to_value(st).unwrap_or_default();
             h.set_keyed(Topic::Power, v.clone(), power_key(&v));
         });
+        let handles = Arc::new(handles::Registry::default());
+        handles.refresh();
+        hub.set(Topic::Handles, serde_json::to_value(handles.list()).unwrap_or_default());
         let h = hub.clone();
-        let handover = Arc::new(handover::Handover::new(move |st| {
+        let handover = Arc::new(handover::Handover::new(handles.clone(), move |st| {
             h.set(Topic::Handover, serde_json::to_value(st).unwrap_or_default());
         }));
         let pool = Arc::new(pool::Pool::new());
@@ -69,7 +74,7 @@ impl Daemon {
             h.set(Topic::Vms, serde_json::to_value(st).unwrap_or_default());
         });
         hub.set(Topic::Handover, serde_json::to_value(handover.state()).unwrap_or_default());
-        Arc::new(Self { hub, guard: Mutex::default(), power, handover, vms, pool, host_kick: (Mutex::new(false), Condvar::new()) })
+        Arc::new(Self { hub, guard: Mutex::default(), power, handover, handles, vms, pool, host_kick: (Mutex::new(false), Condvar::new()) })
     }
 
     /// Read host status again now (a setting changed, or someone subscribed).
@@ -124,6 +129,15 @@ impl Daemon {
                 }
                 g.state.clone()
             };
+            let c = self.handles.refresh();
+            if c.list {
+                // a device service came, went or changed its hardware
+                self.hub.set(Topic::Handles, serde_json::to_value(self.handles.list()).unwrap_or_default());
+            }
+            if c.list || !c.started.is_empty() {
+                // hot: what is assigned to running VMs is lent now (again, from a service that restarted)
+                self.handover.handles_changed(&c.started);
+            }
             self.vms.tick();
             self.handover.tick();
             self.power.tick(&guard);

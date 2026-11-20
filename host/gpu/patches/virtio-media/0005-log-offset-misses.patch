@@ -1,0 +1,22 @@
+Patch virtio-media 0.0.8: the V4L2 proxy says when a buffer's host MMAP offset has no guest offset (the guest would
+get the host offset and fail to map it).
+
+diff -ruN a/src/devices/v4l2_device_proxy.rs b/src/devices/v4l2_device_proxy.rs
+--- a/src/devices/v4l2_device_proxy.rs	2026-11-19 19:40:58.341917663 +0000
++++ b/src/devices/v4l2_device_proxy.rs	2026-11-19 19:40:58.369918520 +0000
+@@ -213,6 +213,15 @@
+                 b.session_id == session_id && b.queue == queue && b.index == index && b.plane == j as u8
+             }) {
+                 plane.set_mem_offset(guest_offset);
++            } else {
++                warn!(
++                    "buffer {:?}/{} plane {} of session {} has no guest MMAP offset (registered: {:?})",
++                    queue,
++                    index,
++                    j,
++                    session_id,
++                    mmap_buffers.iter().map(|(o, b)| (*o, b.session_id, b.queue, b.index)).collect::<Vec<_>>()
++                );
+             }
+         }
+     }

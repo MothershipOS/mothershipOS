@@ -75,7 +75,7 @@ const RETIRED: &[&str] = &[
 ];
 const RETIRED_UNITS: &[&str] = &["mship-cpu.service", "mship-display.service"];
 /// restarted after an install (the long-running services and the session)
-const RESTART: &[&str] = &["mship-vm-net.service", "mship-audio.service", "mship-battery.service", "mship-bt-bridge.service", "mship-camera.service", "mship-modem.service", "mship-usb.service", "mship-wifi-bridge.service",
+const RESTART: &[&str] = &["mship-vm-net.service", "mship-audio.service", "mship-battery.service", "mship-bt-bridge.service", "mship-camera.service", "mship-gnss.service", "mship-modem.service", "mship-sensors.service", "mship-usb.service", "mship-wifi-bridge.service",
                            "mship-pwrkey-rearm.service", "mothershipd.service", "mship-sway.service"];
 
 fn remove(p: &Path) -> Res<()> {

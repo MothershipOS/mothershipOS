@@ -235,6 +235,32 @@ impl QmiClient {
         }
     }
 
+    /// A request whose result comes as an indication with the same message id (QMI LOC answers most requests so):
+    /// the response, then that indication. Other indications stay queued for [`indications`](Self::indications).
+    pub fn request_ind(&mut self, msg: u16, tlvs: &[Vec<u8>], timeout: Duration) -> Result<QmiMsg, String> {
+        self.request(msg, tlvs, timeout)?;
+        let end = Instant::now() + timeout;
+        loop {
+            if let Some(i) = self.pending.iter().position(|m| m.msg == msg) {
+                return Ok(self.pending.remove(i));
+            }
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(format!("qmi {:#x}/{msg:#06x}: no indication", self.service));
+            }
+            if crate::poll(&[self.fd()], Some(left)).is_empty() {
+                continue;
+            }
+            while let Some((node, port, data)) = self.sock.recv().map_err(|e| format!("qmi {:#x}: {e}", self.service))? {
+                if (node, port) == (self.node, self.port)
+                    && let Some(m) = QmiMsg::decode(&data).filter(|m| m.kind == QMI_INDICATION)
+                {
+                    self.pending.push(m);
+                }
+            }
+        }
+    }
+
     /// Indications received so far (without blocking). Err: the service is gone.
     pub fn indications(&mut self) -> std::io::Result<Vec<QmiMsg>> {
         let mut out = std::mem::take(&mut self.pending);

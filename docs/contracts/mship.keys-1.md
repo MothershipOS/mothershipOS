@@ -1,5 +1,12 @@
 # mship.keys 1.x
 
+- **Works:** volume keys with the `buttons` group, the power key and the `KEY_WAKEUP` press with the `display` group;
+  the volume take-back combo.
+- **Needs work:**
+  - The device is named by crosvm's default keyboard name, not `mship-keys`.
+  - Release covers held volume keys only when the buttons group goes, not the power key.
+  - Keys held at attach are forwarded (their release reaches the guest without a press).
+
 **Guest view:** one virtio-input keyboard device named `mship-keys`, reporting only `KEY_VOLUMEUP` (115),
 `KEY_VOLUMEDOWN` (114), `KEY_POWER` (116), `KEY_WAKEUP` (143), plus `EV_SYN`.
 
@@ -18,8 +25,3 @@ acts. (Linux key events have no cancel; a release is the defined end.)
 **Empty:** no events.
 
 **History:** 1.0 (2026.1) initial.
-
-**Gaps in the current implementation (fix before 2026.1):**
-- The device is named by crosvm's default keyboard name, not `mship-keys`.
-- Release covers held volume keys only when the buttons group goes, not the power key.
-- Keys held at attach are forwarded (their release reaches the guest without a press).

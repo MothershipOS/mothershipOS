@@ -1,5 +1,10 @@
 # mship.gpu 1.x
 
+- **Works:** `drm` native context (Mesa freedreno/turnip) and `cross-domain` in PixelOS and the Ubuntu desktop;
+  `virgl` for the Ubuntu desktop's boot splash and console; gfxstream as PixelOS's fallback path.
+- **Not implemented:** host cached-coherent BOs (SM8250 lacks stage-2 FWB); `virgl` gralloc on GKI guests cannot
+  learn host layouts (use `cross-domain`); `gfxstream-vulkan`.
+
 **Guest view:** the virtio-gpu device of the platform with 3D enabled. The context types listed in the slot's
 `params.context_types` are offered as capsets; the guest picks among them.
 
@@ -20,6 +25,4 @@ the one hardware-specific part of the guest image (it ships drivers for every GP
 **Required:** a requested context type the host can't offer makes the slot unsupported (required → the VM
 won't start).
 
-**History:** 1.0 (2026.1) initial (`drm` and `cross-domain` added before the release).
-**Gaps:** host cached-coherent BOs are not offered (SM8250 lacks stage-2 FWB); `virgl` gralloc on GKI guests
-cannot learn host layouts (use `cross-domain`).
+**History:** 1.0 (2026.1) initial.

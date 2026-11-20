@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mship_core::api::{SCREEN_ITEMS, ShowResult, VmInfo, VmList};
+use mship_core::api::{ShowResult, VmInfo, VmList};
 use mship_host::util::{Result, fail, load_value};
 use mship_host::vm;
 
@@ -163,7 +163,7 @@ impl Vms {
                 session::sway(&["workspace", "number", &ws]); // the panel stays with whoever has it
                 return Ok(ShowResult::default());
             }
-            self.handover.take(SCREEN_ITEMS); // on the panel: a leased VM gives it back
+            self.handover.take_screen(); // on the panel: a leased VM gives it back
             session::sway(&["workspace", "number", &ws]);
             session::sway(&["output", "DSI-1", "scale", "1"]);
         } else if conf.is_some() {

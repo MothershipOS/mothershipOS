@@ -14,6 +14,13 @@ Four handles, each exclusive (one VM holds it at a time) and lent separately:
 | `audio:headset` | `headset` | the 3.5 mm jack: headphones, headset mic and the jack's plug state |
 | `audio:mic` | `microphone` | the built-in microphones (main and back) |
 
+- **Works:** in PixelOS, playback and capture on the speaker, earpiece, headset and mics with Android's own routing;
+  each of the four groups can be lent and taken back while the VM runs.
+- **Needs work:** earpiece and headphones share one codec path on the nio (as stock): the host plays whichever the
+  jack selects, and the guest's other one of the two is not heard meanwhile. Same for the main and the headset mic
+  (one ADC).
+- **Not implemented:** call audio (voice runs in the modem's DSP on the nio); Bluetooth or USB audio for VMs.
+
 ## Guest view
 - **Device:** one virtio-snd device (the platform says how; `cuttlefish-arm64`: a vhost-user sound device) with six
   PCM streams, each its own PCM device (the stream's `hda_fn_nid` = its index), in this fixed order:
@@ -50,14 +57,13 @@ Four handles, each exclusive (one VM holds it at a time) and lent separately:
   jacks report unplugged. Streams stay open and keep running in real time.
 - **Host default afterwards:** the device serves the host's own sounds.
 
-**History:** 1.0 (2026.1) initial. (An earlier, unreleased draft of 1.0 had one generic output and input, routed by the
-host.)
+**History:** 1.0 (2026.1) initial.
 
 **Implementation:** the launcher (`audio_slot()` in `crates/mship-launch/src/main.rs`) starts per VM one PipeWire node
 per stream, `mship-vm-<vm>.<speaker|earpiece|headset|mic|backmic|headsetmic>` (pw-loopbacks: sinks whose output
 `.out`, sources whose input `-in`, mship-audio links; the phone side is passive, so a device only runs while the guest
 uses it), and `vhost-device-sound --backend alsa` with `MSHIP_SOUND_STREAMS=out,out,out,in,in,in` and
-`MSHIP_SOUND_JACKS=2:hp,5:mic` (our patches, `host/vm-sound/patches`: 0013 streams and jacks; 0011 completion when
+`MSHIP_SOUND_JACKS=2:hp,5:mic` (mothershipOS's patches, `host/vm-sound/patches`: 0013 streams and jacks; 0011 completion when
 played; 0012 device open only while in use; 0006–0010 PipeWire fixes and tracing, `MSHIP_SOUND_TRACE=1`). The
 backend's PCM `mship_pcm<n>` is the PipeWire plugin with that stream's node (`<vm dir>/audio/.asoundrc`); the jack
 state comes from `<vm dir>/audio/jacks` (`hp=0|1 mic=0|1`), which the launcher also serves as the switches device
@@ -66,13 +72,7 @@ state comes from `<vm dir>/audio/jacks` (`hp=0|1 mic=0|1`), which the launcher a
 monitor for inputs); writes the jack state for the headset holder; and makes the host's own routing follow the jack
 (card profile: headphones/earpiece, headset mic/built-in mics). Devices: `/etc/mothership/audio.json` (`speaker`,
 `earpiece`, `headphones`, `mic` (stereo: main, back), `headset_mic`). Control socket `/run/mothership/audio.sock`
-(`attach <vm> <handle>`, `detach <vm> [reason] <handle>`, `status`), mothershipd items `speaker`, `earpiece`,
+(`attach <vm> <handle>`, `detach <vm> [reason] <handle>`, `status`), mothershipd groups `speaker`, `earpiece`,
 `headset`, `microphone` (lent while the VM runs). Guest side (PixelOS): the stock AIDL audio HAL with its device list
 extended to these devices and PCMs, and Android's wired-accessory handling on input switches
 (`pixelOS_16_VM/docs/android-vm.md`). The nio's devices: `motorola_nio/docs/audio.md`.
-
-**Gaps (fix before 2026.1):**
-- Earpiece and headphones share one codec path on the nio (as stock): the host plays whichever the jack selects; the
-  guest's other one of the two is not heard meanwhile. Same for the main and the headset mic (one ADC).
-- No call audio (voice runs in the modem's DSP on the nio); no Bluetooth or USB audio for VMs.
-- The caps aren't published (no broker `list-handles` yet).

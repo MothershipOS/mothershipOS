@@ -11,7 +11,9 @@ use mship_core::status::Resources;
 use serde_json::Value;
 
 use crate::ui::{Metric, Rows, button, esc, fmt_rate, group, mhz, page, row, strings};
-use crate::{HW, HW_SCREEN, S, VMS, base, vm_conf, vm_name};
+use mship_core::handle::Lend;
+
+use crate::{S, VMS, base, vm_conf, vm_name};
 
 // ------------------------------------------------------------------ sampling
 /// per-CPU (busy, total) jiffies from /proc/stat; index 0 is all CPUs together
@@ -365,9 +367,10 @@ pub fn vm_page(s: &S, d: &str) -> adw::NavigationPage {
     g_now.add(&r_act);
     let g = group("Assigned hardware", "");
     let assoc = s.handover().assoc;
-    let assigned: Vec<_> = HW.iter().filter(|(k, _, _)| assoc.get(*k).map(String::as_str) == Some(d)).collect();
-    for (k, t, i) in &assigned {
-        g.add(&row(t, if HW_SCREEN.contains(k) { "while shown" } else { "while running" }, Some(i), false));
+    let groups = s.handles().groups;
+    let assigned: Vec<_> = groups.iter().filter(|g| assoc.get(&g.name).map(String::as_str) == Some(d)).collect();
+    for gr in &assigned {
+        g.add(&row(&gr.label, if gr.lend == Lend::WhileShown { "while shown" } else { "while running" }, Some(&gr.icon), false));
     }
     if assigned.is_empty() {
         g.add(&row("Nothing assigned", "everything stays with mothershipOS", None, false));
@@ -386,9 +389,10 @@ pub fn vm_page(s: &S, d: &str) -> adw::NavigationPage {
             let Some(s) = me.upgrade() else { return };
             let run = s.vm_info(&d).is_some_and(|v| v.running);
             let own = s.handover().holders;
-            let held: Vec<&str> = HW.iter().filter(|(k, _, _)| own.get(*k) == Some(&path)).map(|(_, t, _)| *t).collect();
-            r_state.set_subtitle(&format!("{}{}", if run { "running" } else { "stopped" },
-                                          if held.is_empty() { String::new() } else { format!(" · has: {}", held.join(", ").to_lowercase()) }));
+            let groups = s.handles().groups;
+            let held: Vec<&str> = groups.iter().filter(|g| own.get(&g.name) == Some(&path)).map(|g| g.label.as_str()).collect();
+            r_state.set_subtitle(&esc(&format!("{}{}", if run { "running" } else { "stopped" },
+                                               if held.is_empty() { String::new() } else { format!(" · has: {}", held.join(", ").to_lowercase()) })));
             give.set_sensitive(run);
             take.set_sensitive(!held.is_empty());
         }
@@ -401,62 +405,92 @@ pub fn vm_page(s: &S, d: &str) -> adw::NavigationPage {
 }
 
 // ------------------------------------------------------------------ hardware assignment
-const HW_OTHER: &[(&str, &str, &str)] = &[
-    ("Speaker & microphones", "mothershipOS", "audio-speakers-symbolic"),
-    ("Camera (OV64B)", "mothershipOS", "camera-photo-symbolic"),
-    ("USB-C port to a PC", "mothershipOS (dev link)", "computer-symbolic"),
-    ("GPU (Adreno 650)", "shared by every VM", "video-display-symbolic"),
-    ("Battery status", "shared by every VM, read-only", "battery-good-symbolic"),
-    ("Modem, sensors", "mothershipOS", "network-cellular-symbolic"),
-];
-
+/// Settings › Hardware, built from the handle registry: every assignable group with its owner, then what every VM
+/// shares. Rebuilt when the registry changes (a device service starts, stops or finds its hardware).
 pub fn hw_page(s: &S) -> adw::NavigationPage {
-    let vms: Vec<String> = s.vm_list().into_iter().map(|v| v.vm).collect();
-    let mut owners = vec!["host".to_string()];
-    owners.extend(vms.iter().cloned());
-    let mut labels = vec!["mothershipOS".to_string()];
-    labels.extend(vms.iter().map(|d| vm_name(d)));
-    let g = group("Owner", "Each device has one owner. A VM gets its devices automatically: the display and buttons while it is shown, Wi-Fi bands and shared internet while it runs. Holding both volume buttons brings the screen back to mothershipOS.");
-    let assoc = s.handover().assoc;
-    let mut rows: Vec<(&str, adw::ComboRow)> = vec![];
-    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-    for (key, title, icon) in HW {
-        let cr = adw::ComboRow::builder().title(*title).model(&strings(&label_refs)).build();
-        cr.add_prefix(&gtk::Image::from_icon_name(icon));
-        let cur = assoc.get(*key).cloned().unwrap_or_else(|| "host".into());
-        cr.set_selected(owners.iter().position(|o| *o == cur).unwrap_or(0) as u32);
-        let (me, owners, labels) = (Rc::downgrade(s), owners.clone(), labels.clone());
-        cr.connect_selected_notify(move |w| {
-            let Some(s) = me.upgrade() else { return };
-            let i = w.selected() as usize;
-            let (me2, label) = (Rc::downgrade(&s), labels[i].clone());
-            s.ask(Op::HandoverAssign { item: key.to_string(), owner: owners[i].clone() }, move |_| {
-                if let Some(s) = me2.upgrade() {
-                    s.toast(&format!("{title} → {label}"));
-                }
-            });
-        });
-        g.add(&cr);
-        rows.push((key, cr));
-    }
-    let g2 = group("Not lendable yet", "");
-    for (t, sub, icon) in HW_OTHER {
-        g2.add(&row(t, sub, Some(icon), false));
-    }
-    let upd = {
-        let me = Rc::downgrade(s);
+    let g = group("Owner", "Each device has one owner. A VM gets its devices automatically: the screen's while it is shown, the rest while it runs. Holding both volume buttons brings the screen back to mothershipOS.");
+    let g2 = group("Shared by every VM", "Every running VM gets these, no assignment needed.");
+    let rows: Rc<RefCell<Vec<(String, Lend, adw::ComboRow)>>> = Rc::default();
+    // the rows in each group, removed on a rebuild
+    let built: Rc<RefCell<(Vec<gtk::Widget>, Vec<gtk::Widget>)>> = Rc::default();
+    let shown_list: Rc<RefCell<Option<mship_core::api::HandleList>>> = Rc::default();
+    let rebuild = {
+        let (me, g, g2, rows, built, shown_list) = (Rc::downgrade(s), g.clone(), g2.clone(), rows.clone(), built.clone(), shown_list.clone());
         move || {
             let Some(s) = me.upgrade() else { return };
+            let list = s.handles();
+            if shown_list.borrow().as_ref() == Some(&list) {
+                return;
+            }
+            {
+                let mut b = built.borrow_mut();
+                for w in b.0.drain(..) {
+                    g.remove(&w);
+                }
+                for w in b.1.drain(..) {
+                    g2.remove(&w);
+                }
+            }
+            rows.borrow_mut().clear();
+            let vms: Vec<String> = s.vm_list().into_iter().map(|v| v.vm).collect();
+            let mut owners = vec!["host".to_string()];
+            owners.extend(vms.iter().cloned());
+            let mut labels = vec!["mothershipOS".to_string()];
+            labels.extend(vms.iter().map(|d| vm_name(d)));
+            let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+            let assoc = s.handover().assoc;
+            for gr in &list.groups {
+                let cr = adw::ComboRow::builder().title(esc(&gr.label)).model(&strings(&label_refs)).build();
+                cr.add_prefix(&gtk::Image::from_icon_name(&gr.icon));
+                cr.set_sensitive(gr.present);
+                let cur = assoc.get(&gr.name).cloned().unwrap_or_else(|| "host".into());
+                cr.set_selected(owners.iter().position(|o| *o == cur).unwrap_or(0) as u32);
+                let (me, owners, labels, key, title) = (Rc::downgrade(&s), owners.clone(), labels.clone(), gr.name.clone(), gr.label.clone());
+                cr.connect_selected_notify(move |w| {
+                    let Some(s) = me.upgrade() else { return };
+                    let i = w.selected() as usize;
+                    if s.handover().assoc.get(&key).map(String::as_str).unwrap_or("host") == owners[i] {
+                        return; // the row was set to what is already assigned
+                    }
+                    let (me2, label, title) = (Rc::downgrade(&s), labels[i].clone(), title.clone());
+                    s.ask(Op::HandoverAssign { item: key.clone(), owner: owners[i].clone() }, move |_| {
+                        if let Some(s) = me2.upgrade() {
+                            s.toast(&format!("{title} → {label}"));
+                        }
+                    });
+                });
+                g.add(&cr);
+                built.borrow_mut().0.push(cr.clone().upcast());
+                rows.borrow_mut().push((gr.name.clone(), gr.lend, cr));
+            }
+            for h in list.handles.iter().map(|i| &i.handle).filter(|h| h.lend == Lend::EveryVm) {
+                let r = row(&h.label, &h.summary(), Some(&h.icon), false);
+                r.set_sensitive(h.present);
+                g2.add(&r);
+                built.borrow_mut().1.push(r.upcast());
+            }
+            *shown_list.borrow_mut() = Some(list);
+        }
+    };
+    let upd = {
+        let (me, rows, rebuild) = (Rc::downgrade(s), rows.clone(), rebuild.clone());
+        move || {
+            rebuild();
+            let Some(s) = me.upgrade() else { return };
             let h = s.handover();
-            for (key, r) in &rows {
-                let holder = h.holders.get(*key).cloned().unwrap_or_else(|| "host".into());
-                let owner = h.assoc.get(*key).cloned().unwrap_or_else(|| "host".into());
-                let text = if holder != "host" {
+            let groups = s.handles().groups;
+            for (key, lend, r) in rows.borrow().iter() {
+                let holder = h.holders.get(key).cloned().unwrap_or_else(|| "host".into());
+                let owner = h.assoc.get(key).cloned().unwrap_or_else(|| "host".into());
+                let summary = groups.iter().find(|g| &g.name == key).map(|g| g.summary.clone()).unwrap_or_default();
+                let text = if !groups.iter().any(|g| &g.name == key && g.present) {
+                    "not present".to_string()
+                } else if holder != "host" {
                     format!("in use by {}", vm_name(base(&holder)))
                 } else if owner != "host" {
-                    format!("{} · lent while it {}", vm_name(&owner), if HW_SCREEN.contains(key) { "is shown" } else { "runs" })
+                    format!("{} · lent while it {}", vm_name(&owner), if *lend == Lend::WhileShown { "is shown" } else { "runs" })
                 } else {
-                    "mothershipOS".into()
+                    format!("mothershipOS · {summary}")
                 };
                 r.set_subtitle(&esc(&text));
             }
@@ -464,7 +498,7 @@ pub fn hw_page(s: &S) -> adw::NavigationPage {
     };
     upd();
     let p = page("Hardware", &[&g, &g2], None);
-    s.follow(&p.page, &[Topic::Handover], upd);
+    s.follow(&p.page, &[Topic::Handover, Topic::Handles, Topic::Vms], upd);
     p.page
 }
 

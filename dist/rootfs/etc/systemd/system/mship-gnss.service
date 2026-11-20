@@ -1,0 +1,13 @@
+[Unit]
+Description=mothershipOS GNSS (mship.gnss: the modem's GNSS receiver for the host and VMs)
+# its VM sockets must exist before a VM starts (crosvm connects the slot's console to them)
+Before=mothershipd.service
+After=mship-modem.service
+
+[Service]
+ExecStart=/usr/local/sbin/mship-gnss
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

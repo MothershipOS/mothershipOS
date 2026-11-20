@@ -1,7 +1,21 @@
 # mship.power 1.0 — system power votes
 
-Status: **implemented on the host (`mothershipd`); not yet in the registry** (`docs/compat.md`,
-`crates/mship-core/src/contracts.rs`) and no manifest slot: every running VM takes part. Open items at the end.
+- **Works:** the host side in `mothershipd`: the vote table, CPU/GPU floors, VM freeze (`vm.sleep`/`vm.wake`), display
+  power of a VM's own output, phone suspend; the host-built vote for the Ubuntu desktop (display, decoder sessions,
+  PSCI SYSTEM_SUSPEND).
+- **Needs work:**
+  - Unverified: whether PixelOS's host-built vote reaches `screen_off` (its display power goes through the
+    launcher's presenter signals, `mship.display-power`).
+- **Not implemented:**
+  - Registry and manifest: `mship.power` is not in `docs/compat.md` or `crates/mship-core/src/contracts.rs`, and VMs
+    have no slot for it: every running VM takes part. Proposed slot: `"system_power": {"contract": "mship.power",
+    "version": "1.0"}`, separate from the `power` slot, which is `mship.display-power`; packages without the slot
+    keep the host-built vote.
+  - Guest adapters: none (no agent in either VM; PixelOS has no adapter for wakelocks or idle).
+  - Sleep preparation: `prepare_sleep` / `ready` / `not_ready` per preparation round, cancelled by any change, so
+    guests can quiesce before a host suspend; a final re-check against pending wake events (kernel wakeup count).
+  - Timed wakes: a guest with scheduled work needs a wake deadline the host honours before it can allow sleep.
+  - The `codec` floor has no control.
 
 Every participant states what it wants; the host decides. Participants are `mothershipOS` itself and every running
 VM. The phone suspends only when all of them agree, and runs its clocks at least at the highest floor anyone asks
@@ -33,7 +47,7 @@ sleep.
 
 Floors: the highest level asked for per resource. `cpu` → every policy's `scaling_min_freq`, `gpu` → the GPU
 devfreq `min_freq` (`low` = lowest step, `balanced` = a third up the table, `high` = the current cap). `codec` is
-recorded but has no control yet (Venus clocks follow its decode sessions' declared load).
+recorded but has no control (Venus clocks follow its decode sessions' declared load).
 
 ## Guest channel
 
@@ -76,21 +90,9 @@ A VM without a guest adapter gets a vote built by the host from what it sees: it
 - **Ubuntu desktop** (no agent in the guest; the host follows it from outside): GNOME blanking closes crosvm's
   window and the presenter reports `vm.display` (→ `screen_off`/`active`); an open session on the Venus decoder
   (virtio-media) counts as `codec: high`; the guest's own suspend (GNOME after 15 min) is PSCI SYSTEM_SUSPEND, which
-  our crosvm turns into `vm.sleep` (`host/gpu/patches/crosvm/0004-psci-system-suspend.patch`). The power key is a
+  mothershipOS's crosvm turns into `vm.sleep` (`host/gpu/patches/crosvm/0004-psci-system-suspend.patch`). The power key is a
   virtio-input KEY_POWER that `crosvm powerbtn` presses (logind powers off, `PowerKeyIgnoreInhibited`).
 - **PixelOS:** no guest adapter; only the host-built vote above.
-
-## Open (not in 1.0)
-
-- Registry and manifest: register `mship.power` in `docs/compat.md` and `contracts.rs`, and give VMs a slot for it
-  (proposed: `"system_power": {"contract": "mship.power", "version": "1.0"}`, separate from the `power` slot, which
-  is `mship.display-power`). Packages without the slot keep the host-built vote.
-- Sleep preparation: `prepare_sleep` / `ready` / `not_ready` per preparation round, cancelled by any change, so
-  guests can quiesce before a host suspend; final re-check against pending wake events (kernel wakeup count).
-- Timed wakes: a guest with scheduled work needs a wake deadline the host honours before it can allow sleep.
-- `codec` floor has no control yet.
-- Open / unverified: whether PixelOS's host-built vote reaches `screen_off` (its display power goes through the
-  launcher's presenter signals, `mship.display-power`); a PixelOS adapter (wakelocks, idle) is not written.
 
 Standby measurements and the phone side of suspend: the port's notes
 ([nio standby](https://github.com/MothershipOS/motorola_nio/blob/main/docs/standby.md)).

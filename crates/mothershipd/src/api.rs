@@ -98,14 +98,8 @@ impl Daemon {
             Op::HandoverGive { vm, items } => vm::vm_dir(&vm).map_err(|e| e.0).and_then(|d| {
                 ok(self.handover.give(&d, (!items.is_empty()).then_some(items)))
             }),
-            Op::HandoverTake { items } => {
-                let items: Vec<&str> = if items.is_empty() {
-                    api::ITEMS.to_vec()
-                } else {
-                    api::ITEMS.iter().copied().filter(|i| items.iter().any(|x| x == i)).collect()
-                };
-                ok(self.handover.take(&items))
-            }
+            Op::HandlesList => ok(self.handles.list()),
+            Op::HandoverTake { items } => ok(self.handover.take_named(&items)),
             Op::HandoverRelease { vm } => vm::vm_dir(&vm).map_err(|e| e.0).and_then(|d| ok(self.handover.release(&d))),
             Op::HandoverToggle => ok(self.handover.toggle()),
             Op::HandoverScreen { on } => ok(self.handover.screen(on)),

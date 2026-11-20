@@ -30,7 +30,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: VmCmd,
     },
-    /// hardware handover: who holds the display, buttons, Wi-Fi bands, internet, Bluetooth, USB
+    /// the hardware handles mothershipOS knows (discovered from the device services): direction, sharing, lending
+    Handles {
+        /// the registry as JSON (handles and groups)
+        #[arg(long)]
+        json: bool,
+    },
+    /// hardware handover: who holds each group (Settings › Hardware), lend and take
     Handover {
         #[command(subcommand)]
         cmd: HandoverCmd,
@@ -154,6 +160,20 @@ fn run(cmd: Cmd) -> Result<Value, String> {
             VmCmd::Sleep { vm } => Op::VmSleep { vm },
             VmCmd::Wake { vm } => Op::VmWake { vm },
         },
+        Cmd::Handles { json } => {
+            let v = mship_core::client::call(Op::HandlesList).map_err(|e| e.to_string())?;
+            if json {
+                return Ok(v);
+            }
+            let list: mship_core::api::HandleList = serde_json::from_value(v).map_err(|e| e.to_string())?;
+            println!("{:<22} {:<14} {:<13} {:<20} {}", "HANDLE", "GROUP", "SERVICE", "CONTRACT", "SHARING · DIRECTION");
+            for i in &list.handles {
+                let h = &i.handle;
+                println!("{:<22} {:<14} {:<13} {:<20} {}{}", h.id, h.group.as_deref().unwrap_or("-"), i.service,
+                         format!("{} {}", h.contract, h.versions.join(",")), h.summary(), if h.present { "" } else { " (not present)" });
+            }
+            return Ok(Value::Null);
+        }
         Cmd::Handover { cmd } => match cmd {
             HandoverCmd::Status => Op::HandoverStatus,
             HandoverCmd::Assoc => Op::HandoverAssoc,

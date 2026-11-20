@@ -4,6 +4,20 @@ USB devices plugged into the phone, driven by the guest's own USB drivers. Handl
 exclusive: while a VM holds it, every USB device on the phone's host ports is the VM's, including devices
 plugged in later. The host keeps the USB controllers, the port's power and role, and the hubs.
 
+- **Works:** in PixelOS with a dummy_hcd mass-storage test device
+  ([`usb-test-device.sh`](https://github.com/MothershipOS/motorola_nio/blob/main/archive/prototypes/usb/usb-test-device.sh):
+  dummy_hcd + a mass-storage gadget, so the dev link stays up): the guest's `usb-storage` binds and Android mounts
+  the FAT disk as a public volume; unplug and re-plug while lent re-attach automatically; release and VM stop give
+  the disk back to the host with its data; the next VM start gets it again; a service restart neither duplicates
+  nor loses attachments. The group can be lent and taken back while the VM runs.
+- **Needs work:**
+  - Unverified: devices on the nio's real USB-C port (dual role: TCPM, dwc3 role switch, VBUS out;
+    `motorola_nio/docs/usb.md`), including the monitor's or dock's keyboard and mouse the Ubuntu desktop VM takes
+    through this handle; the verified path uses dummy_hcd only.
+  - Isochronous devices (webcams, USB audio) are untested through crosvm's passthrough.
+  - The VM's crosvm control socket is created by the launcher, not allocated by a broker.
+- **Not implemented:** per-device assignment (one device to one VM, another to another): the whole group moves.
+
 ## Guest view
 - **Controller:** one virtual xHCI controller (the platform says which; `cuttlefish-arm64`: crosvm's xHCI on
   PCI, the guest's `usb1`/`usb2` root hubs). It is always there. With the handle empty it has no devices.
@@ -37,18 +51,5 @@ rescan, `crosvm usb attach/detach` on the VM's control socket (`<vm dir>/crosvm.
 the usbdevfs node as root, and crosvm gets the fd), `USBDEVFS_RESET` and `drivers_probe` to give devices
 back, control socket `/run/mothership/usb.sock` (`attach <vm>`, `detach <vm> [reason]`, `status`), the owner
 kept in `/run/mothership/usb-owner` and attachments recovered from `crosvm usb list` after a service
-restart. mothershipd item `usb` (lent while the VM runs). Android: the guest fstab lets vold mount
+restart. mothershipd group `usb` (lent while the VM runs). Android: the guest fstab lets vold mount
 USB disks (`pixelOS_16_VM/patches/device/google/cuttlefish/0001-fstab-vold-usb-disks.patch`).
-Tested 2026-10-18 on the nio with PixelOS, using a dummy_hcd test device ([`usb-test-device.sh`](https://github.com/MothershipOS/motorola_nio/blob/main/archive/prototypes/usb/usb-test-device.sh): dummy_hcd + a mass-storage
-gadget, so the dev link stays up): the guest's `usb-storage` binds and Android mounts the FAT disk as a
-public volume, unplug and re-plug while lent re-attach automatically, release and VM stop give the disk back to
-the host with its data, the next VM start gets it again, and a service restart neither duplicates nor loses
-attachments.
-
-**Gaps (fix before 2026.1):**
-- Open / unverified: the nio's USB-C port is dual role (TCPM, dwc3 role switch, VBUS out;
-  `motorola_nio/docs/usb.md`) and the Ubuntu desktop VM takes a monitor's or dock's keyboard and mouse through this
-  handle, but the passthrough test above used dummy_hcd only.
-- Per-device assignment (one device to one VM, another to another) is not in 1.0: the whole group moves.
-- Isochronous devices (webcams, USB audio) are untested through crosvm's passthrough.
-- The VM's crosvm control socket is created by the launcher, not allocated by a broker.

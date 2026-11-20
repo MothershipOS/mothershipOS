@@ -1,0 +1,14 @@
+[Unit]
+Description=mothershipOS sensors (mship.sensors: the sensor DSP's sensors for every VM)
+After=local-fs.target systemd-modules-load.service
+# its VM sockets must exist before a VM starts (crosvm connects the slot's console to them)
+Before=mothershipd.service
+ConditionPathExists=/etc/mothership/sensors.json
+
+[Service]
+ExecStart=/usr/local/sbin/mship-sensors
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

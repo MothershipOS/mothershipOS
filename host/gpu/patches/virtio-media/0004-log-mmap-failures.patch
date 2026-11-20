@@ -1,0 +1,45 @@
+Patch virtio-media 0.0.8: the V4L2 proxy says why an MMAP request fails (the guest only gets EINVAL): the buffer
+offset it doesn't know (and the ones it does), or the mapping error.
+
+diff -ruN a/src/devices/v4l2_device_proxy.rs b/src/devices/v4l2_device_proxy.rs
+--- a/src/devices/v4l2_device_proxy.rs	2026-11-19 19:19:23.935692222 +0000
++++ b/src/devices/v4l2_device_proxy.rs	2026-11-19 19:19:23.963693015 +0000
+@@ -1353,11 +1353,21 @@
+     ) -> Result<(u64, u64), i32> {
+         let rw = (flags & VIRTIO_MEDIA_MMAP_FLAG_RW) != 0;
+ 
+-        let plane_info = self
+-            .mmap_buffers
+-            .get_mut(&offset)
+-            .filter(|b| b.session_id == session.id)
+-            .ok_or(libc::EINVAL)?;
++        // mothershipOS: say why an MMAP request fails (the guest only sees EINVAL)
++        let known: Vec<String> = self.mmap_buffers.iter().map(|(o, b)| format!("{o:#x}:s{}", b.session_id)).collect();
++        let plane_info = match self.mmap_buffers.get_mut(&offset) {
++            Some(b) if b.session_id == session.id => b,
++            other => {
++                warn!(
++                    "MMAP of offset {:#x} by session {}: {} (buffers {:?})",
++                    offset,
++                    session.id,
++                    if other.is_some() { "another session's buffer" } else { "no such buffer" },
++                    known
++                );
++                return Err(libc::EINVAL);
++            }
++        };
+ 
+         // Export the FD for the plane and cache it if needed.
+         //
+@@ -1397,7 +1407,10 @@
+                     .mem_offset;
+                 self.mmap_manager
+                     .create_mapping_at(offset, session.device.as_fd(), rw, host_offset as u64)
+-                    .map_err(|_| libc::EINVAL)?
++                    .map_err(|e| {
++                        warn!("MMAP of offset {:#x} (host offset {:#x}): {:?}", offset, host_offset, e);
++                        libc::EINVAL
++                    })?
+             }
+             Err(e) => return Err(e),
+         };

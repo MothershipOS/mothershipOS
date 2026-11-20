@@ -21,7 +21,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use mship_devices::{for_session, fresh, log, poll, read_uevent, uevents};
+use mship_core::handle::{Direction, Handle};
+use mship_devices::{for_session, fresh, log, poll, publish_handles, read_uevent, uevents};
 
 const PSY: &str = "/sys/class/power_supply";
 const SOCK: &str = "/run/mothership/battery.sock";
@@ -123,6 +124,7 @@ fn serve() -> std::io::Result<()> {
     let l = UnixListener::bind(SOCK)?;
     for_session(Path::new(SOCK), 0o660);
     l.set_nonblocking(true)?;
+    publish_handles("battery", &[Handle::new("battery:0", "mship.battery", "Battery status", "battery-good-symbolic", Direction::In, "").every_vm(None)]);
     let ue = uevents().map_err(|e| log(format!("no uevents ({e}), polling only"))).ok();
     let mut s = Service { clients: vec![], sent: None };
     s.update();

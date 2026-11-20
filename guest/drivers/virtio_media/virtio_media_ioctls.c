@@ -781,7 +781,9 @@ static int virtio_media_get_objects(struct virtio_media *vv,
 			goto err;
 		}
 		dmabufs[i] = dmabuf;
-		if (!is_virtio_dma_buf(dmabuf)) {
+		/* is_virtio_dma_buf() is always true on CFI kernels (GKI): only virtio-gpu's buffers are virtio objects
+		 * here, anything else (a dma-buf heap's) would call a garbage get_uuid */
+		if (!dmabuf->exp_name || strcmp(dmabuf->exp_name, "virtio_gpu") || !is_virtio_dma_buf(dmabuf)) {
 			v4l2_err(&vv->v4l2_dev, "DMABUF plane %d is not a virtio object\n", i);
 			ret = -EINVAL;
 			goto err;

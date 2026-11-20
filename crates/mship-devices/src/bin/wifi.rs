@@ -26,11 +26,13 @@ use std::time::{Duration, Instant};
 
 use mship_devices::mw::{self, Attrs, a_s32, a_u8, a_u16, a_u32, a_u32s, attr};
 use mship_devices::netlink::{self as nl, Genl, get_i32, get_u8, get_u16, get_u32, get_u32s, nla, nla_flag, nla_nest, nla_u8, nla_u16, nla_u32};
-use mship_devices::{for_session, fresh, log};
+use mship_core::handle::{Direction, Handle};
+use mship_devices::{for_session, fresh, log, publish_handles};
 use serde_json::{Value, json};
 
 const CONF: &str = "/etc/mothership/wifi-bridge.json";
 const CTL: &str = "/run/mothership/wifi-bridge.sock";
+const VMS: &str = "/var/lib/mothership/vms";
 
 /// <linux/nl80211.h>
 mod n {
@@ -768,6 +770,13 @@ impl Bridge {
     fn control(&self, msg: &str) -> String {
         let w: Vec<&str> = msg.split_whitespace().collect();
         let mut st = self.lock();
+        // a VM by its vsock CID or its directory name (the broker's generic lend: attach <vm> <band>, detach <vm> <reason> <band>)
+        let as_cid = |v: &str| v.parse::<u32>().ok().or_else(|| {
+            let m: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(Path::new(VMS).join(v).join("vm.json")).ok()?).ok()?;
+            m["cid"].as_u64().map(|c| c as u32)
+        });
+        let w: Vec<String> = w.iter().enumerate().map(|(i, x)| if i == 1 { as_cid(x).map(|c| c.to_string()).unwrap_or_else(|| x.to_string()) } else { x.to_string() }).collect();
+        let w: Vec<&str> = w.iter().map(String::as_str).collect();
         match w.as_slice() {
             ["attach", cid, band, ..] if self.conf.bands.contains_key(*band) && cid.parse::<u32>().is_ok() => {
                 let cid: u32 = cid.parse().unwrap();
@@ -792,7 +801,7 @@ impl Bridge {
                 "lent": st.desired.iter().map(|(c, b)| (c.to_string(), json!(b))).collect::<serde_json::Map<_, _>>(),
             })
             .to_string(),
-            _ => "error: attach <cid> <band> | detach <cid> [reason] | status".into(),
+            _ => "error: attach <vm|cid> <band> | detach <vm|cid> [reason] | status".into(),
         }
     }
 
@@ -862,6 +871,13 @@ fn serve() -> std::io::Result<()> {
     std::thread::spawn(move || e.event_loop());
     let c = b.clone();
     std::thread::spawn(move || c.control_loop());
+    let bands: Vec<Handle> = b.conf.bands.keys().map(|band| {
+        let label = match band.as_str() { "2g" => "Wi-Fi 2.4 GHz".to_string(), "5g" => "Wi-Fi 5 GHz".to_string(), b => format!("Wi-Fi {b}") };
+        Handle::new(&format!("wifi:{band}"), "mship.wifi", &label, "network-wireless-symbolic", Direction::Both, &format!("wifi-{band}"))
+            .caps(json!({"bands": [band]}))
+            .control(CTL, Some(band))
+    }).collect();
+    publish_handles("wifi-bridge", &bands);
     let l = vsock::VsockListener::bind_with_cid_port(libc::VMADDR_CID_ANY, mw::PORT)?;
     log(format!("listening on vsock port {}", mw::PORT));
     for conn in l.incoming() {

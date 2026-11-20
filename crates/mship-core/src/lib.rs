@@ -12,6 +12,7 @@ pub mod api;
 pub mod client;
 pub mod contracts;
 pub mod ctl;
+pub mod handle;
 pub mod manifest;
 pub mod pool;
 pub mod status;

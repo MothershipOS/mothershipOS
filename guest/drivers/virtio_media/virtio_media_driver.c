@@ -469,11 +469,16 @@ virtio_media_process_dqbuf_event(struct virtio_media *vv,
 
 	/*
 	 * Preserve the 'm' union that was passed to us during QBUF so userspace
-	 * gets back the information it submitted.
+	 * gets back the information it submitted (USERPTR, DMABUF).
+	 * mothershipOS: not for MMAP buffers: their offset is the device's, and a
+	 * caller may queue them with `m` left 0 (Android's external camera HAL
+	 * does); keeping that would hand back offset 0 at DQBUF, and the next
+	 * mmap() of the buffer fails (EINVAL).
 	 */
 	buffer_m = dqbuf->buffer.m;
 	memcpy(&dqbuf->buffer, &dqbuf_evt->buffer, sizeof(dqbuf->buffer));
-	dqbuf->buffer.m = buffer_m;
+	if (dqbuf->buffer.memory != V4L2_MEMORY_MMAP)
+		dqbuf->buffer.m = buffer_m;
 	if (V4L2_TYPE_IS_MULTIPLANAR(dqbuf->buffer.type)) {
 		if (dqbuf->buffer.length > VIDEO_MAX_PLANES) {
 			v4l2_err(&vv->v4l2_dev,
@@ -484,7 +489,8 @@ virtio_media_process_dqbuf_event(struct virtio_media *vv,
 			plane_m = dqbuf->planes[i].m;
 			memcpy(&dqbuf->planes[i], &dqbuf_evt->planes[i],
 			       sizeof(struct v4l2_plane));
-			dqbuf->planes[i].m = plane_m;
+			if (dqbuf->buffer.memory != V4L2_MEMORY_MMAP)
+				dqbuf->planes[i].m = plane_m;
 		}
 	}
 
@@ -866,7 +872,15 @@ static int virtio_media_device_mmap(struct file *file,
 	 * frames whose corruption propagates through a GOP. WC matches how vb2
 	 * maps streaming buffers.
 	 */
-	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+	if (video_dev->vfl_dir == VFL_DIR_M2M)
+		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+	/*
+	 * mothershipOS: other devices (capture: the host's cameras, v4l2loopback
+	 * buffers the host CPU writes) stay cacheable: the host's mapping is
+	 * cacheable too, so the aliases are coherent, and a camera HAL reads
+	 * every frame from here (a WC mapping makes those reads several times
+	 * slower).
+	 */
 
 	ret = io_remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
 				 vma->vm_end - vma->vm_start,

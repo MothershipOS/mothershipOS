@@ -34,13 +34,16 @@ and drivers for its hardware, and it can run every VM. **A new VM** uses the con
 
 ## Status
 First port: **Motorola nio** (moto g100 / edge s, XT2125-4, Qualcomm SM8250 / Snapdragon 870).
-- Boot: u-boot as the hypervisor (EL2) → Linux 6.18 at EL2 with KVM, Ubuntu 26.04 root on UFS.
-- Android 16 (PixelOS, Cuttlefish arm64) and Ubuntu 26.04 desktop as VMs at the same time: GPU through virtio-gpu
+- **Works:** boot with u-boot as the hypervisor (EL2) → Linux 6.18 at EL2 with KVM, Ubuntu 26.04 root on UFS.
+  Android 16 (PixelOS, Cuttlefish arm64) and Ubuntu 26.04 desktop as VMs at the same time: GPU through virtio-gpu
   native context (Mesa freedreno/turnip), displays by DRM lease with zero-copy scanout, hardware video decode,
-  native Wi-Fi per band, Bluetooth, battery, USB, modem (LTE data, SMS, call signalling), the phone's speaker,
-  earpiece, headset and mics, the cameras (V4L2 in the guests), system power votes, a shared pool of CPUs and RAM.
-- Not yet: call audio, GPS service (the engine works on the host), sensors, fingerprint for VMs, release 2026.1
-  (open gaps in [docs/compat.md](docs/compat.md) and each contract).
+  Bluetooth, battery, USB, modem (LTE data, SMS, call signalling), the phone's speaker, earpiece, headset and mics,
+  the cameras (V4L2 in the guests), GNSS (satellites and NMEA in PixelOS), sensors in PixelOS, system power votes, a
+  shared pool of CPUs and RAM. Every hardware group can be lent to and taken back from a running VM.
+- **Broken:** Wi-Fi crash recovery: when the QCA6390 firmware crashes (during a connection) Wi-Fi is gone for the host and the VMs until a reboot
+  ([mship.wifi](docs/contracts/mship.wifi-1.md)).
+- **Not implemented:** call audio, fingerprint for VMs, release 2026.1 (open items in [docs/compat.md](docs/compat.md)
+  and each contract).
 
 ## If you are trying to…
 - **run a Linux desktop, or a second Android, on your phone as a VM** — that is what this is.
@@ -61,7 +64,7 @@ This repository is meant to be found and used by coding agents. Start here:
 - [llms.txt](llms.txt): a map of the repository for language models.
 - [docs/architecture.md](docs/architecture.md): how the host, ports and VMs fit together.
 - [docs/contracts/](docs/contracts/README.md): the interfaces, one file per contract (`mship.display`,
-  `mship.wifi`, `mship.modem`, `mship.camera`, …), each with its guest view, lifecycle and open gaps.
+  `mship.wifi`, `mship.modem`, `mship.camera`, …), each with its guest view, lifecycle and status.
 - [docs/dev-workflow.md](docs/dev-workflow.md): building (`cargo xtask`), deploying and debugging on a phone.
 - Port bring-up notes record what failed and why, not only what works: search them before re-deriving a fix.
 

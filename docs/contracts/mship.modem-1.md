@@ -7,6 +7,21 @@ remote file system and NV, the SIM's provisioning, the data path), talks to it o
 itself, so their packets reach the guest's data NIC. Handle `modem:0` (group `cellular`), exclusive: while a VM
 holds it, the host has no mobile data.
 
+- **Works:** with the stock Cuttlefish RIL in PixelOS on the nio (LTE): registration, signal, operator, mobile data
+  (IPv4) on the VM's NIC, SMS both ways, call signalling both ways. The group can be lent and taken back while the VM
+  runs.
+- **Needs work:**
+  - IPv6 and several simultaneous data calls (Android's IMS and MMS APNs) are untested; only IPv4 is routed.
+  - The guest's RIL never tells the modem when a data call ends (Cuttlefish's RIL only takes its interface down),
+    so a call lives until the guest dials again (reused) or the handle is released.
+  - Cell bandwidth and frequency range in `%CGFPCCFG` are not reported (0); cell info lists are the RIL's own.
+- **Not implemented:**
+  - Voice audio: calls are signalled, but the speech path needs the host kernel's voice stack: the vocoder runs on
+    the SM8250's ADSP and the SDX55 exchanges speech frames with it over PCIe (a shared mailbox, `voice_mhi`),
+    steered over an ADSP-to-SDX55 IPC link (MHI satellite channels). None of that exists in mainline; plan in
+    `motorola_nio/docs/voice.md`.
+  - A slot on `efi-virt-arm64` (its guests, ModemManager, need a transport).
+
 ## Guest view
 - **Control:** an AT command channel (the platform says which; `cuttlefish-arm64`: a vsock stream to the host,
   port 9600, the port Cuttlefish's RIL finds in `androidboot.modem_simulator_ports`) speaking the dialect of
@@ -44,7 +59,7 @@ holds it, the host has no mobile data.
   slot.
 
 ## Caps
-`at` (`cuttlefish-modem-simulator`), `data` (`ipv4`), `slots` (SIM slots), `voice` (`signalling`: see the gaps),
+`at` (`cuttlefish-modem-simulator`), `data` (`ipv4`), `slots` (SIM slots), `voice` (`signalling`: no speech path, see Not implemented),
 `sms` (`3gpp`), `nr` (`nsa`).
 
 ## Attached / empty
@@ -63,9 +78,6 @@ holds it, the host has no mobile data.
 
 **History:** 1.0 (2026.1) initial.
 
-**Status (2026-11-18):** working with the stock Cuttlefish RIL in PixelOS on the nio (O2 SK, LTE): registration,
-signal, operator, mobile data on the VM's NIC, SMS both ways, calls both ways (signalling). Committed: nothing yet.
-
 **Implementation:** `mship-modem` (`crates/mship-devices/src/bin/modem`, `mship-modem.service`):
 - `main.rs`: the modem's QRTR TFTP service (`/lib/firmware/qcom/sdx55m`, `/var/lib/mothership/modem/readwrite`),
   NV write-back from the kernel's Sahara dumps to `mdm1m9kefs1`/`2` (originals kept in
@@ -80,18 +92,6 @@ signal, operator, mobile data on the VM's NIC, SMS both ways, calls both ways (s
 - `at.rs`: transport (vsock guests, the modem's WWAN AT port).
 
 Control socket `/run/mothership/modem.sock` (`attach <vm>`, `detach <vm> [reason]`, `status` with the network
-summary), mothershipd item `cellular` (lent while the VM runs). Kernel side: `motorola_nio/kernel/patches/0025`-
+summary), mothershipd group `cellular` (lent while the VM runs). Kernel side: `motorola_nio/kernel/patches/0025`-
 `0027` (MHI for a flashless SDX55, the Sahara image and EFS server), policy routing in the host config. Bring-up
 notes: `motorola_nio/firmware/nio-sdx55m/README.md`.
-
-**Gaps (fix before 2026.1):**
-- Voice audio: calls are signalled, but the speech path needs the host kernel's voice stack: the vocoder runs on
-  the SM8250's ADSP and the SDX55 exchanges speech frames with it over PCIe (a shared mailbox, `voice_mhi`),
-  steered over an ADSP-to-SDX55 IPC link (MHI satellite channels). None of that exists in mainline yet; plan in
-  `motorola_nio/docs/voice.md`.
-- IPv6 and several simultaneous data calls (Android's IMS and MMS APNs) are untested; only IPv4 is routed.
-- The guest's RIL never tells the modem when a data call ends (Cuttlefish's RIL only takes its interface down),
-  so a call lives until the guest dials again (reused) or the handle is released.
-- Cell bandwidth and frequency range in `%CGFPCCFG` are not reported (0); cell info lists are the RIL's own.
-- Only the `cuttlefish-arm64` platform has the slot; `efi-virt-arm64` guests (ModemManager) need a transport.
-- The caps aren't published (no broker `list-handles` yet).

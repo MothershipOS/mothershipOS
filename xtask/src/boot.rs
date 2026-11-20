@@ -95,7 +95,7 @@ pub struct Kernel {
 /// The external (not in-tree) modules built with the kernel, by name: each `<name>.c` (headers `<name>*.h`) in
 /// motorola_nio/kernel/drivers. Only these: a file there is not built just because it exists (work in progress
 /// lives in kernel/wip). Our own drivers belong in the kernel as patches (kernel/patches, Kconfig, config fragment).
-const EXTERNAL_MODULES: &[&str] = &["v4l2loopback"];
+const EXTERNAL_MODULES: &[&str] = &[];
 
 pub fn host_kernel() -> Result<Kernel> {
     let work = target_dir().join("host-kernel");
@@ -146,22 +146,24 @@ pub fn host_kernel() -> Result<Kernel> {
     // the external modules (EXTERNAL_MODULES, from motorola_nio/kernel/drivers), one module each, into extra/
     let ext = work.join("ext");
     let _ = std::fs::remove_dir_all(&ext);
-    std::fs::create_dir_all(&ext)?;
-    let mut kbuild = String::new();
-    let drivers = port().join("kernel/drivers");
-    for m in EXTERNAL_MODULES {
-        for e in std::fs::read_dir(&drivers)?.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with(m) && (name.ends_with(".c") || name.ends_with(".h")) {
-                std::fs::copy(e.path(), ext.join(&name))?;
+    if !EXTERNAL_MODULES.is_empty() {
+        std::fs::create_dir_all(&ext)?;
+        let mut kbuild = String::new();
+        let drivers = port().join("kernel/drivers");
+        for m in EXTERNAL_MODULES {
+            for e in std::fs::read_dir(&drivers)?.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with(m) && (name.ends_with(".c") || name.ends_with(".h")) {
+                    std::fs::copy(e.path(), ext.join(&name))?;
+                }
             }
-        }
-        ensure!(ext.join(format!("{m}.c")).exists(), "{m}.c: not in {}", drivers.display());
-        kbuild += &format!("obj-m += {m}.o\n");
+            ensure!(ext.join(format!("{m}.c")).exists(), "{m}.c: not in {}", drivers.display());
+            kbuild += &format!("obj-m += {m}.o\n");
     }
     std::fs::write(ext.join("Kbuild"), kbuild)?;
     kmake(&["M=/k/ext", "-j", &jobs(), "modules"])?;
     kmake(&["M=/k/ext", "INSTALL_MOD_PATH=/k/modroot", "INSTALL_MOD_DIR=extra", "INSTALL_MOD_STRIP=1", "modules_install"])?;
+    }
     let image = out.join("arch/arm64/boot/Image");
     let manifest = serde_json::json!({
         "linux": host_source()?,

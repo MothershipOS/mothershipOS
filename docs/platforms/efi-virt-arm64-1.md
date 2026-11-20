@@ -4,6 +4,15 @@ Runs an arm64 desktop Linux guest from a disk image (Ubuntu 26.04 desktop:
 [ubuntu_26.04_desktop_VM](https://github.com/MothershipOS/ubuntu_26.04_desktop_VM)). The host implements it with
 crosvm; the VMM is not part of the contract.
 
+- **Works:** the Ubuntu desktop boots by direct kernel boot and runs with every device below (the state of each
+  slot is in its contract).
+- **Needs work:**
+  - Networking is always on (NATed), not a lendable `mship.net-shared` slot.
+  - Sound is a virtio-snd device played on the external display's audio (DisplayPort), not `mship.audio` handles.
+  - The vsock CID comes from `vm.json` instead of being allocated.
+- **Not implemented:** UEFI boot (AAVMF with a persistent variable store); `mship.touch` and `mship.keys`;
+  `mship.gnss`, `mship.sensors` and `mship.modem` slots.
+
 **Boot:** the VM's own kernel `boot.kernel` (from its package, [vm-packages.md](../vm-packages.md)), booted directly
 with the disk `boot.disk`, root on its first partition (`/dev/vda1`, ext4). No initrd: the guest kernel has its
 drivers built in. `boot.params` adds kernel parameters (debugging).
@@ -23,13 +32,6 @@ drivers built in. `boot.params` adds kernel parameters (debugging).
 | console | virtio-console `hvc0` (the host keeps it as `serial.log`) |
 
 **History:** 1.0 (2026.1) initial.
-
-**Gaps in the current implementation (fix before 2026.1):**
-- UEFI boot (AAVMF with a persistent variable store) is not implemented; only direct kernel boot.
-- No `mship.touch` or `mship.keys`.
-- Networking is always on (NATed), not a lendable `mship.net-shared` slot.
-- Sound is a virtio-snd device played on the external display's audio (DisplayPort), not `mship.audio` handles.
-- The vsock CID comes from `vm.json` instead of being allocated.
 
 **Debugging:** `vm.json` `"env": {"NAME": "value"}` sets variables for the launcher, crosvm and the presenter
 (e.g. `MSHIP_VM_DISPLAY_STATS=1`: per-second frame/flip/copy statistics in `display.log`; `MSHIP_VM_SOUND=0`,

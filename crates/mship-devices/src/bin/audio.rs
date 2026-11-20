@@ -33,7 +33,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mship_devices::{GROUP, for_session, fresh, log};
+use mship_core::handle::{Direction, Handle};
+use mship_devices::{GROUP, for_session, fresh, log, publish_handles};
 use serde_json::{Value, json};
 
 const CONF: &str = "/etc/mothership/audio.json";
@@ -415,6 +416,13 @@ fn serve() -> std::io::Result<()> {
     fresh(Path::new(CTL));
     let ctl = UnixDatagram::bind(CTL)?;
     for_session(Path::new(CTL), 0o660);
+    // one handle per phone audio device; the group is what Settings › Hardware assigns, the arg what attach names
+    publish_handles("audio", &[
+        Handle::new("audio:speaker", "mship.audio", "Speaker", "audio-speakers-symbolic", Direction::Out, "speaker").control(CTL, Some("speaker")),
+        Handle::new("audio:earpiece", "mship.audio", "Earpiece", "call-start-symbolic", Direction::Out, "earpiece").control(CTL, Some("earpiece")),
+        Handle::new("audio:headset", "mship.audio", "Headset (3.5 mm jack)", "audio-headset-symbolic", Direction::Both, "headset").control(CTL, Some("headset")),
+        Handle::new("audio:mic", "mship.audio", "Microphones", "audio-input-microphone-symbolic", Direction::In, "microphone").control(CTL, Some("mic")),
+    ]);
     ctl.set_read_timeout(Some(Duration::from_millis(300)))?;
     s.poll_jack();
     if let Some(g) = Graph::read() {

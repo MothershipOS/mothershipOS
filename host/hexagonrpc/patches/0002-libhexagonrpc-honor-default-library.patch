@@ -1,0 +1,15 @@
+From: mothershipOS
+Subject: [PATCH] libhexagonrpc: honor default_library
+
+mothershipOS links hexagonrpcd statically (-Ddefault_library=static): one self-contained daemon, no library next
+to Ubuntu's libhexagonrpc package.
+
+diff --git a/libhexagonrpc/meson.build b/libhexagonrpc/meson.build
+--- a/libhexagonrpc/meson.build
++++ b/libhexagonrpc/meson.build
+@@ -1,4 +1,4 @@
+-libhexagonrpc = shared_library('hexagonrpc',
++libhexagonrpc = library('hexagonrpc',
+   'context.c',
+   'fastrpc.c',
+   'interfaces.c',

@@ -9,14 +9,16 @@
 //! - input: touch, volume keys and power key through mship-inputd, only while lent (handover -> input.ctl)
 //! - battery: goldfish battery fed from mship-battery; usb: crosvm xHCI via crosvm.sock (mship-usb)
 //! - sound (mship.audio): virtio-snd into the VM's PipeWire sink; mship-audio routes it to the speaker while lent
-//! - bluetooth: hvc5 -> mship-bt-bridge; network: taps pxmtap0/pxetap0/pxwtap0/pxwltap0 (mship-vm-net)
+//! - console slots (bluetooth hvc5, GNSS hvc6, sensors hvc13): the launcher's relays to the device services (`slots`),
+//!   hot-pluggable; network: taps pxmtap0/pxetap0/pxwtap0/pxwltap0 (mship-vm-net)
 //! - adb: `adb connect vsock:3:5555`; logs: kernel.log (hvc0), logcat.log (hvc2), serial.log (UART)
 
+use std::collections::BTreeMap;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{CROSVM, GPU_LIBS, INPUTD, PRESENTER, Res, Vm, audio_slot, camera_nodes, env_or, err, evdev, follow, log_file, signal, venus_decoder, wait_for};
+use crate::{CROSVM, GPU_LIBS, INPUTD, PRESENTER, Res, Vm, audio_slot, camera_nodes, env_or, err, evdev, follow, log_file, signal, venus_decoder, venus_encoder, wait_for};
 
 /// Cuttlefish's own crosvm and gfxstream (the fallback)
 const CF_CROSVM: &str = "/opt/crosvm/bin/crosvm";
@@ -40,20 +42,28 @@ fn vsock_stub(port: u32) {
     });
 }
 
-/// hvc<N> = virtio-console num N+1 (Cuttlefish layout: 0 kernel, 1 shell, 2 logcat, 3-17 host channels)
-fn hvc(vm: &Vm, n: u32, bt: &str) -> String {
+/// hvc<N> = virtio-console num N+1 (Cuttlefish layout: 0 kernel, 1 shell, 2 logcat, 3-17 host channels). `slots`: the
+/// hot-pluggable slots by console (the launcher's relays to the device services, `slots`).
+fn hvc(vm: &Vm, n: u32, slots: &BTreeMap<u32, String>) -> String {
     let d = vm.dir_str();
     match n {
         0 => format!("--serial=type=file,path={d}/kernel.log,hardware=virtio-console,num=1"),
         1 => format!("--serial=type=file,path={d}/console.log,hardware=virtio-console,num=2"),
         2 => format!("--serial=type=file,path={d}/logcat.log,hardware=virtio-console,num=3"),
-        // bt slot (mship.bt): the Bluetooth HAL's H4 stream to mship-bt-bridge
-        5 if std::path::Path::new(bt).exists() => {
-            format!("--serial=type=unix-stream,path={bt},input-unix-stream,hardware=virtio-console,num=6")
-        }
-        n => format!("--serial=type=sink,hardware=virtio-console,num={}", n + 1),
+        n => match slots.get(&n) {
+            Some(path) => format!("--serial=type=unix-stream,path={path},input-unix-stream,hardware=virtio-console,num={}", n + 1),
+            None => format!("--serial=type=sink,hardware=virtio-console,num={}", n + 1),
+        },
     }
 }
+
+/// The console slots of cuttlefish-arm64 (docs/platforms/cuttlefish-arm64-1.md): (console, slot name, contract, the
+/// device service's socket for the VM). A slot exists when the VM's manifest has its contract.
+const CONSOLE_SLOTS: &[(u32, &str, &str, &str)] = &[
+    (5, "bt", "mship.bt", "/run/mothership/bt"),           // the Bluetooth HAL's H4 stream -> mship-bt-bridge
+    (6, "gnss", "mship.gnss", "/run/mothership/gnss"),     // the GNSS HAL's NMEA (/dev/gnss0) -> mship-gnss
+    (13, "sensors", "mship.sensors", "/run/mothership/sensors"), // the goldfish sensors HAL (/dev/hvc13) -> mship-sensors
+];
 
 pub fn run(vm: &Arc<Vm>) -> Res<i32> {
     let d = &vm.dir;
@@ -124,7 +134,14 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
     for f in ["console.sock", "crosvm.sock"] {
         let _ = std::fs::remove_file(d.join(f));
     }
-    let bt = format!("/run/mothership/bt/{}.sock", vm.name); // served by mship-bt-bridge while it runs
+    // the slots the manifest declares, relayed by the launcher for the VM's whole life (hot: services may come later)
+    let has = |contract: &str| vm.conf["slots"].as_object().is_some_and(|s| s.values().any(|x| x["contract"] == contract));
+    let mut slots = BTreeMap::new();
+    for (n, name, contract, dir) in CONSOLE_SLOTS {
+        if has(contract) {
+            slots.insert(*n, crate::slots::slot(vm, name, &format!("{dir}/{}.sock", vm.name))?);
+        }
+    }
     let ds = vm.dir_str();
     let mut args: Vec<String> = vec![
         "--log-level=info".into(), "run".into(), "--name".into(), "pixelos".into(), "--disable-sandbox".into(),
@@ -133,7 +150,7 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
         "--block".into(), format!("path={ds}/disk.img"),
         format!("--serial=type=file,path={ds}/serial.log,hardware=serial,num=1,console=true,earlycon=true"),
     ];
-    args.extend((0..18).map(|n| hvc(vm, n, &bt)));
+    args.extend((0..18).map(|n| hvc(vm, n, &slots)));
     args.extend(["--vsock".into(), format!("cid={}", vm.conf["cid"].as_u64().unwrap_or(3))]);
     if crosvm == CROSVM {
         // battery slot (mship.battery): goldfish battery our crosvm feeds from mship-battery
@@ -147,6 +164,13 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
         // cameras (mship.camera): one V4L2 capture device each, also via virtio-media
         if vm.conf["slots"]["camera"].is_object() {
             args.extend(camera_nodes(&vm.name).into_iter().map(|n| format!("--v4l2-proxy={n}")));
+        }
+        // HW video encode (mship.video): the host Venus encoder, after the cameras (the guest's camera HAL numbers
+        // its cameras by /dev/videoN and skips memory-to-memory devices, so the cameras keep their ids)
+        if env_or("MSHIP_VM_VIDEO", "true") == "true"
+            && let Some(v) = venus_encoder()
+        {
+            args.push(format!("--v4l2-proxy={v}"));
         }
     }
     args.extend(["--socket".into(), format!("{ds}/crosvm.sock")]);
