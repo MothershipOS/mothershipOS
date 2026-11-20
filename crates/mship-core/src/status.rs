@@ -302,7 +302,7 @@ pub struct VmResources {
     pub gpu_ns: u64,
 }
 
-/// Root-only counters for the Resources page (the shell turns them into rates).
+/// Root-only counters for the Performance pages (the shell turns them into rates).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Resources {
     /// monotonic seconds

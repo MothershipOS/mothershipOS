@@ -1,4 +1,4 @@
-//! Counters only root can read, for Settings › Resources (the shell turns them into rates): GPU busy time of all
+//! Counters only root can read, for the Performance pages (the shell turns them into rates): GPU busy time of all
 //! msm DRM clients (fdinfo drm-engine-gpu, counted once per client), the Venus core clock, and per VM the CPU
 //! ticks, PSS and GPU time of the VMM's process tree.
 

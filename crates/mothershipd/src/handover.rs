@@ -1,7 +1,7 @@
 //! Hardware handover: lend hardware to VMs, take it back.
 //!
 //! What there is comes from the handle registry (`handles`): every assignable group has one assigned owner
-//! (mothershipOS or a VM) in /var/lib/mothership/config/hardware.json (Settings › Hardware), and is lent the way its
+//! (mothershipOS or a VM) in /var/lib/mothership/config/hardware.json (a VM's page › Hardware), and is lent the way its
 //! handles say: with the screen (`while_shown`: they move with the shown VM) or while the VM runs. A group whose
 //! handles have a control socket is lent through it (`attach <vm> [arg]`, `detach <vm> <reason> [arg]`); handles
 //! every VM gets (`every_vm`) need no handover.

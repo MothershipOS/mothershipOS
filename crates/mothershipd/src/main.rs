@@ -3,10 +3,11 @@
 //!
 //! Domains: power ([`power`]: mship.power votes and the guest channel, VM sleep/wake and display power, frequency
 //! floors, phone suspend, critical battery), the CPU temperature guard ([`cpuguard`]), the hardware handover
-//! ([`handover`]), VM lifecycle ([`vms`]), the VMs' shared CPUs and RAM ([`pool`]), host status and settings (mship-host). At start it applies the saved
+//! ([`handover`]), the panel brightness following the display ([`brightness`]), VM lifecycle ([`vms`]), the VMs' shared CPUs and RAM ([`pool`]), host status and settings (mship-host). At start it applies the saved
 //! charge limit (the battery driver starts at 100 %), CPU mode and brightness.
 
 mod api;
+mod brightness;
 mod cpuguard;
 mod handles;
 mod handover;
@@ -37,6 +38,7 @@ pub struct Daemon {
     pub handles: Arc<handles::Registry>,
     pub vms: Arc<vms::Vms>,
     pub pool: Arc<pool::Pool>,
+    pub brightness: Arc<brightness::Brightness>,
     host_kick: (Mutex<bool>, Condvar),
 }
 
@@ -65,7 +67,10 @@ impl Daemon {
         handles.refresh();
         hub.set(Topic::Handles, serde_json::to_value(handles.list()).unwrap_or_default());
         let h = hub.clone();
+        let brightness = brightness::Brightness::new();
+        let b = brightness.clone();
         let handover = Arc::new(handover::Handover::new(handles.clone(), move |st| {
+            b.follow(&st.holders); // the panel's brightness follows the display
             h.set(Topic::Handover, serde_json::to_value(st).unwrap_or_default());
         }));
         let pool = Arc::new(pool::Pool::new());
@@ -74,7 +79,8 @@ impl Daemon {
             h.set(Topic::Vms, serde_json::to_value(st).unwrap_or_default());
         });
         hub.set(Topic::Handover, serde_json::to_value(handover.state()).unwrap_or_default());
-        Arc::new(Self { hub, guard: Mutex::default(), power, handover, handles, vms, pool, host_kick: (Mutex::new(false), Condvar::new()) })
+        brightness.follow(&handover.holders());
+        Arc::new(Self { hub, guard: Mutex::default(), power, handover, handles, vms, pool, brightness, host_kick: (Mutex::new(false), Condvar::new()) })
     }
 
     /// Read host status again now (a setting changed, or someone subscribed).
@@ -140,6 +146,7 @@ impl Daemon {
             }
             self.vms.tick();
             self.handover.tick();
+            self.brightness.tick(self.vms.list().vms.into_iter().filter(|v| v.running).map(|v| v.vm).collect());
             self.power.tick(&guard);
             self.pool.tick(&self.power.state().participants);
             std::thread::sleep(TICK);

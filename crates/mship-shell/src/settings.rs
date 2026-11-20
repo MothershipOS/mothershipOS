@@ -1,4 +1,4 @@
-//! Settings: the list, and the battery, Wi-Fi, Bluetooth, SSH, CPU, region & time and display pages.
+//! The Phone page, and its battery, Wi-Fi, Bluetooth, SSH, CPU, region & time and display pages.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -23,30 +23,55 @@ fn with(s: &S, f: impl Fn(&S) + 'static) -> impl Fn() + 'static {
 
 type PageFn = fn(&S) -> adw::NavigationPage;
 
-pub fn settings_page(s: &S) -> adw::NavigationPage {
-    let g = group("", "");
-    let items: &[(&str, &str, &str, PageFn)] = &[
-        ("Battery", "charging, charge limit", "battery-good-symbolic", battery_page),
-        ("Wi-Fi", "networks, ownership", "network-wireless-symbolic", wifi_page),
+/// The Phone page: everything about the host, in one place.
+pub fn phone_page(s: &S) -> adw::NavigationPage {
+    let nav = |g: &adw::PreferencesGroup, items: &[(&str, &str, &str, PageFn)]| {
+        for (title, sub, icon, f) in items {
+            let r = row(title, sub, Some(icon), true);
+            let f = *f;
+            let go = with(s, move |s| s.push(&f(s)));
+            r.connect_activated(move |_| go());
+            g.add(&r);
+        }
+    };
+    let g_perf = group("", "");
+    nav(&g_perf, &[("Performance", "CPU, memory, GPU, power, temperatures; CPU mode", "power-profile-performance-symbolic", system::resources_page)]);
+    let g_conn = group("Connections", "");
+    nav(&g_conn, &[
+        ("Wi-Fi", "networks", "network-wireless-symbolic", wifi_page),
         ("Bluetooth", "devices, pairing", "bluetooth-active-symbolic", bt_page),
         ("SSH", "remote login", "network-server-symbolic", ssh_page),
-        ("CPU & performance", "Cool / Balanced / Performance, clocks, temperatures", "power-profile-performance-symbolic", cpu_page),
-        ("Resources", "live CPU, memory, GPU, power, network; per VM", "gnome-power-manager-symbolic", system::resources_page),
-        ("Region & time", "country (Wi-Fi rules), time zone, clock", "preferences-system-time-symbolic", region_page),
+    ]);
+    let g_dev = group("Device", "");
+    nav(&g_dev, &[
+        ("Battery", "charging, charge limit", "battery-good-symbolic", battery_page),
         ("Display", "brightness, scale, screen & sleep", "video-display-symbolic", display_page),
-        ("Hardware", "assign devices to VMs: display, buttons, Wi-Fi bands", "drive-multidisk-symbolic", system::hw_page),
-        ("Virtual machines", "shared memory and CPUs; limits", "computer-symbolic", system::vm_mem_page),
-        ("About", "system information", "help-about-symbolic", system::about_page),
-        ("Power votes", "diagnostic: raw mship.power table", "utilities-terminal-symbolic", system::power_page),
-    ];
-    for (title, sub, icon, f) in items {
-        let r = row(title, sub, Some(icon), true);
-        let f = *f;
-        let go = with(s, move |s| s.push(&f(s)));
-        r.connect_activated(move |_| go());
-        g.add(&r);
-    }
-    page("Settings", &[&g], None).page
+        ("Region & time", "country (Wi-Fi rules), time zone, clock", "preferences-system-time-symbolic", region_page),
+    ]);
+    // who owns which hardware (changed on each VM's page)
+    let hw = Rows::new(group("Hardware", ""));
+    let g_more = group("", "");
+    let term = row("Terminal", "host shell", Some("utilities-terminal-symbolic"), true);
+    term.connect_activated(|_| crate::terminal::open());
+    g_more.add(&term);
+    nav(&g_more, &[("About", "system information", "help-about-symbolic", system::about_page)]);
+    let g_pow = group("", "");
+    let r_pow = row("Power", "running VMs are shut down first", Some("system-shutdown-symbolic"), false);
+    r_pow.add_suffix(&button("Restart", None, with(s, |s| s.power_dialog(true))));
+    r_pow.add_suffix(&button("Power off", Some("destructive-action"), with(s, |s| s.power_dialog(false))));
+    g_pow.add(&r_pow);
+    let p = page("Phone", &[&g_perf, &g_conn, &g_dev, &hw.group, &g_more, &g_pow], None);
+    let upd = {
+        let (me, hw) = (Rc::downgrade(s), hw.clone());
+        move || {
+            if let Some(s) = me.upgrade() {
+                crate::vm::overview(&s, &hw);
+            }
+        }
+    };
+    upd();
+    s.follow(&p.page, &[Topic::Handover, Topic::Handles, Topic::Vms], upd);
+    p.page
 }
 
 /// A full-page searchable list; items = [(label, value)]. Used instead of popover drop-downs: a popover is

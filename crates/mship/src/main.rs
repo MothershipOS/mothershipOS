@@ -36,7 +36,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// hardware handover: who holds each group (Settings › Hardware), lend and take
+    /// hardware handover: who holds each group (a VM's page › Hardware), lend and take
     Handover {
         #[command(subcommand)]
         cmd: HandoverCmd,
@@ -82,7 +82,7 @@ enum VmCmd {
 enum HandoverCmd {
     /// who holds each item now
     Status,
-    /// who each item is assigned to (Settings › Hardware)
+    /// who each item is assigned to (a VM's page › Hardware)
     Assoc,
     /// lend items to a VM (all assigned to it if none given)
     Give { vm: String, items: Vec<String> },

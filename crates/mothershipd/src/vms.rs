@@ -153,7 +153,7 @@ impl Vms {
         let conf = load_value(d.join("vm.json"));
         let c = conf.clone().unwrap_or_default();
         if conf.is_some() && c["output"].as_str().unwrap_or("DSI-1") != "DSI-1" {
-            // its screen is another display (External display in Settings › Hardware): the panel stays as it is
+            // its screen is another display (External display in a VM's page › Hardware): the panel stays as it is
             return Ok(ShowResult { message: Some(format!("{} is on the external display", c["name"].as_str().unwrap_or(name))) });
         }
         if c["display_mode"].as_str() == Some("window") {
@@ -167,7 +167,7 @@ impl Vms {
             session::sway(&["workspace", "number", &ws]);
             session::sway(&["output", "DSI-1", "scale", "1"]);
         } else if conf.is_some() {
-            self.handover.give(&d, None); // everything assigned to the VM (Settings › Hardware)
+            self.handover.give(&d, None); // everything assigned to the VM (a VM's page › Hardware)
         } else {
             session::sway(&["workspace", "2"]);
             session::sway(&["output", "DSI-1", "scale", "1"]);

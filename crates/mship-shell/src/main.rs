@@ -1,12 +1,11 @@
 //! mship-shell: the mothershipOS shell, the host's touch UI (GTK 4 + libadwaita); runs as user mship in the sway
 //! session.
 //!
-//! Home: host status, virtual machines (start / show / sleep / stop), the VM store ([`store`]: search, install,
-//! update), terminal, settings, power off / restart.
-//! Resources: live CPU (per core), memory, GPU, battery power, network, storage, per-VM and top processes.
-//! Settings: battery, Wi-Fi, Bluetooth, SSH, CPU modes, region & time, display, hardware owners, VM memory,
-//! about, the raw power votes. Everything goes through mothershipd ([`broker`]); the on-screen keyboard (wvkbd)
-//! shows while a text field or the terminal ([`terminal`]) has focus.
+//! Two places: Home is the VMs (start / show / stop, a search of the VM store, the store; a VM's page [`vm`] has
+//! everything about it: hardware, performance, memory, update), the Phone page is the host (performance, Wi-Fi,
+//! Bluetooth, SSH, battery, display, region & time, who owns which hardware, terminal, about, power off). Everything
+//! goes through mothershipd ([`broker`]); the on-screen keyboard (wvkbd) shows while a text field or the terminal
+//! ([`terminal`]) has focus.
 
 mod broker;
 mod settings;
@@ -14,6 +13,7 @@ mod store;
 mod system;
 mod terminal;
 mod ui;
+mod vm;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -26,7 +26,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use broker::Broker;
-use ui::{Rows, button, esc, group, mhz, page, row};
+use ui::{Rows, button, esc, group, page, row};
 
 pub const VMS: &str = "/var/lib/mothership/vms";
 const OSK: &str = "wvkbd-mobintl";
@@ -74,11 +74,7 @@ fn base(path: &str) -> &str {
 struct Home {
     clock: gtk::Label,
     date: gtk::Label,
-    batt: adw::ActionRow,
-    wifi: adw::ActionRow,
-    cpu: adw::ActionRow,
-    ssh: adw::ActionRow,
-    res: adw::ActionRow,
+    phone: adw::ActionRow,
     shop: adw::ActionRow,
     vms: Rows,
 }
@@ -92,7 +88,6 @@ pub struct Shell {
     clock24: Cell<bool>,
     batt_short: RefCell<String>,
     home: RefCell<Option<Home>>,
-    home_cpu: Cell<Option<(u64, u64)>>,
 }
 
 pub type S = Rc<Shell>;
@@ -189,7 +184,7 @@ impl Shell {
         self.broker.state_as(Topic::Handover)
     }
 
-    /// The hardware mothershipOS knows (the handle registry): what Settings › Hardware shows.
+    /// The hardware mothershipOS knows (the handle registry): what a VM's page › Hardware shows.
     pub fn handles(&self) -> HandleList {
         self.broker.state_as(Topic::Handles)
     }
@@ -202,60 +197,40 @@ impl Shell {
         top.append(&clock);
         top.append(&date);
 
-        let g_status = group("Host", "");
+        // the phone: one line of its state, everything about it behind it
+        let g_phone = group("", "");
+        let phone = row("Phone", "…", Some("emblem-system-symbolic"), true);
         let me = Rc::downgrade(self);
-        let nav_to = move |f: fn(&S) -> adw::NavigationPage| {
-            let me = me.clone();
-            move |_: &adw::ActionRow| {
-                if let Some(s) = me.upgrade() {
-                    s.push(&f(&s));
-                }
+        phone.connect_activated(move |_| {
+            if let Some(s) = me.upgrade() {
+                s.push(&settings::phone_page(&s));
             }
-        };
-        let batt = row("Battery", "…", Some("battery-good-symbolic"), true);
-        batt.connect_activated(nav_to(settings::battery_page));
-        let wifi = row("Wi-Fi", "…", Some("network-wireless-symbolic"), true);
-        wifi.connect_activated(nav_to(settings::wifi_page));
-        let cpu = row("CPU", "…", Some("power-profile-performance-symbolic"), true);
-        cpu.connect_activated(nav_to(settings::cpu_page));
-        let ssh = row("SSH", "…", Some("network-server-symbolic"), true);
-        ssh.connect_activated(nav_to(settings::ssh_page));
-        let res = row("Resources", "…", Some("gnome-power-manager-symbolic"), true);
-        res.connect_activated(nav_to(system::resources_page));
-        for r in [&batt, &wifi, &cpu, &res, &ssh] {
-            g_status.add(r);
-        }
+        });
+        g_phone.add(&phone);
 
-        let vms = Rows::new(group("Virtual machines", "The assist key or holding both volume buttons returns to mothershipOS"));
-
-        let g_apps = group("Apps", "");
+        // the VMs: a search of the store, the installed ones, the store
+        let vms = Rows::new(group("Virtual machines", "Tap a VM for its hardware, performance and settings. The assist key or holding both volume buttons returns here."));
+        let search = gtk::SearchEntry::builder().placeholder_text("Find VMs to install").hexpand(true).build();
+        let me = Rc::downgrade(self);
+        search.connect_activate(move |e| {
+            if let Some(s) = me.upgrade() {
+                s.push(&store::store_page_query(&s, &e.text()));
+                e.set_text("");
+            }
+        });
+        let g_search = group("", "");
+        g_search.add(&search);
+        let g_find = group("", "");
         let shop = row("VM store", "find, install and update VMs", Some("system-software-install-symbolic"), true);
-        shop.connect_activated(nav_to(store::store_page));
-        let term = row("Terminal", "host shell (foot)", Some("utilities-terminal-symbolic"), true);
-        term.connect_activated(|_| terminal::open());
-        let sett = row("Settings", "Wi-Fi, SSH, CPU, display, hardware", Some("emblem-system-symbolic"), true);
-        sett.connect_activated(nav_to(settings::settings_page));
-        g_apps.add(&shop);
-        g_apps.add(&term);
-        g_apps.add(&sett);
-
-        let g_power = group("", "");
-        let r_power = row("Power", "running VMs are shut down first", Some("system-shutdown-symbolic"), false);
         let me = Rc::downgrade(self);
-        r_power.add_suffix(&button("Restart", None, move || {
+        shop.connect_activated(move |_| {
             if let Some(s) = me.upgrade() {
-                s.power_dialog(true);
+                s.push(&store::store_page(&s));
             }
-        }));
-        let me = Rc::downgrade(self);
-        r_power.add_suffix(&button("Power off", Some("destructive-action"), move || {
-            if let Some(s) = me.upgrade() {
-                s.power_dialog(false);
-            }
-        }));
-        g_power.add(&r_power);
+        });
+        g_find.add(&shop);
 
-        let p = page("mothershipOS", &[&g_status, &vms.group, &g_apps, &g_power], None);
+        let p = page("mothershipOS", &[&g_phone, &vms.group, &g_search, &g_find], None);
         p.toolbar.set_reveal_top_bars(false);
         let bx = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
         bx.append(&top);
@@ -263,11 +238,14 @@ impl Shell {
         p.toolbar.set_content(None::<&gtk::Widget>);
         bx.append(&p.prefs);
         p.toolbar.set_content(Some(&bx));
-        *self.home.borrow_mut() = Some(Home { clock, date, batt, wifi, cpu, ssh, res, shop, vms });
+        // no focus on the search until it is tapped (else the keyboard covers the home screen)
+        let win = self.win.clone();
+        p.page.connect_shown(move |_| gtk::prelude::GtkWindowExt::set_focus(&win, None::<&gtk::Widget>));
+        *self.home.borrow_mut() = Some(Home { clock, date, phone, shop, vms });
         p.page
     }
 
-    fn power_dialog(self: &Rc<Self>, reboot: bool) {
+    pub fn power_dialog(self: &Rc<Self>, reboot: bool) {
         let vms: Vec<String> = self.vm_list().into_iter().filter(|v| v.running).map(|v| v.name).collect();
         let verb = if reboot { "Restart" } else { "Power off" };
         let body = if vms.is_empty() { "No VM is running.".to_string() } else { format!("These VMs are shut down first: {}.", vms.join(", ")) };
@@ -307,50 +285,34 @@ impl Shell {
         h.date.set_label(&format!("{}{}", ui::local_time("%A %-d %B"), if bs.is_empty() { String::new() } else { format!("  ·  {bs}") }));
     }
 
-    /// The home screen's CPU and memory line.
-    fn tick_res(&self) {
-        let cpu = system::cpu_times().first().copied();
-        let prev = self.home_cpu.replace(cpu);
-        let m = system::meminfo();
-        let (total, avail) = (m.get("MemTotal").copied().unwrap_or(0) as f64, m.get("MemAvailable").copied().unwrap_or(0) as f64);
-        let mem = format!("memory {:.1} of {:.1} GB", (total - avail) / 1048576.0, total / 1048576.0);
-        if let (Some(c), Some(p), Some(h)) = (cpu, prev, self.home.borrow().as_ref())
-            && c.1 > p.1
-        {
-            h.res.set_subtitle(&format!("CPU {:.0} % · {mem}", 100.0 * (c.0 - p.0) as f64 / (c.1 - p.1) as f64));
-        }
-    }
-
     fn on_status(&self, s: HostStatus) {
         {
             let h = self.home.borrow();
             let Some(h) = h.as_ref() else { return };
             let b = &s.battery;
-            h.batt.set_subtitle(&esc(&batt_text(b)));
             *self.batt_short.borrow_mut() = if b.present {
                 format!("{}%{}", b.capacity.unwrap_or(0), if b.status.as_deref() == Some("Charging") { " ⚡" } else { "" })
             } else {
                 String::new()
             };
+            // battery · Wi-Fi · CPU mode
             let w = &s.wifi;
-            if w.owner != "host" {
-                h.wifi.set_subtitle(&esc(&format!("lent to {}", if w.owner_name.is_empty() { &w.owner } else { &w.owner_name })));
+            let wifi = if w.owner != "host" {
+                format!("Wi-Fi lent to {}", if w.owner_name.is_empty() { &w.owner } else { &w.owner_name })
             } else if w.state == "connected" {
-                h.wifi.set_subtitle(&esc(&format!("{} · {} · {} dBm", w.ssid.as_deref().unwrap_or(""), w.ip.as_deref().unwrap_or(""), w.signal.unwrap_or(0))));
+                w.ssid.clone().unwrap_or_else(|| "Wi-Fi".into())
             } else {
-                h.wifi.set_subtitle(if w.radio { &w.state } else { "off" });
-            }
+                format!("Wi-Fi {}", if w.radio { w.state.as_str() } else { "off" })
+            };
             let c = &s.cpu;
-            let fr: Vec<String> = c.policies.iter().map(|p| mhz(p.cur)).collect();
-            let hot = c.hottest.map_or(String::new(), |t| format!(" · {t:.0} °C"));
             let mode = profile_name(c.profile.as_deref().unwrap_or("custom"));
-            h.cpu.set_subtitle(&format!("{mode}{} · {}{hot}", if c.throttled { " (throttling)" } else { "" }, fr.join(" / ")));
-            let ss = &s.ssh;
-            h.ssh.set_subtitle(&if ss.enabled && ss.active {
-                ss.addresses.iter().map(|a| a.split_whitespace().next().unwrap_or("")).collect::<Vec<_>>().join(", ")
-            } else {
-                "off".into()
-            });
+            let mut parts = vec![];
+            if b.present {
+                parts.push(format!("{}%", b.capacity.unwrap_or(0)));
+            }
+            parts.push(wifi);
+            parts.push(format!("{mode}{}", if c.throttled { " (throttling)" } else { "" }));
+            h.phone.set_subtitle(&esc(&parts.join(" · ")));
         }
         *self.status.borrow_mut() = Some(s);
     }
@@ -381,6 +343,15 @@ impl Shell {
                 "stopped".into()
             };
             let r = row(&v.name, &sub, Some(if v.manifest { "phone-symbolic" } else { "computer-symbolic" }), false);
+            if v.manifest {
+                r.set_activatable(true);
+                let (me, d) = (Rc::downgrade(self), d.clone());
+                r.connect_activated(move |_| {
+                    if let Some(s) = me.upgrade() {
+                        s.push(&vm::vm_page(&s, &d));
+                    }
+                });
+            }
             let act = |label: &str, style: Option<&str>, f: fn(&S, &str)| {
                 let (me, d) = (Rc::downgrade(self), d.clone());
                 button(label, style, move || {
@@ -398,26 +369,16 @@ impl Shell {
             } else if v.busy.is_none() {
                 r.add_suffix(&act("Start", None, Shell::start_vm)); // VMs run side by side
             }
-            if v.manifest {
-                let g = gtk::Button::builder().icon_name("emblem-system-symbolic").valign(gtk::Align::Center).css_classes(["flat"]).build();
-                let (me, d) = (Rc::downgrade(self), d.clone());
-                g.connect_clicked(move |_| {
-                    if let Some(s) = me.upgrade() {
-                        s.push(&system::vm_page(&s, &d));
-                    }
-                });
-                r.add_suffix(&g);
-            }
             h.vms.add(&r);
         }
     }
 
-    fn start_vm(self: &S, d: &str) {
+    pub fn start_vm(self: &S, d: &str) {
         self.toast(&format!("Starting {}…", vm_name(d)));
         self.ask(Op::VmStart { vm: d.into() }, |_| {});
     }
 
-    fn show_vm(self: &S, d: &str) {
+    pub fn show_vm(self: &S, d: &str) {
         let me = Rc::downgrade(self);
         self.ask_t(Op::VmShow { vm: d.into() }, move |r: ShowResult| {
             if let (Some(m), Some(s)) = (r.message, me.upgrade()) {
@@ -426,7 +387,7 @@ impl Shell {
         });
     }
 
-    fn stop_vm(self: &S, d: &str) {
+    pub fn stop_vm(self: &S, d: &str) {
         self.toast(&format!("Stopping {}…", vm_name(d)));
         self.ask(Op::VmStop { vm: d.into() }, |_| {});
     }
@@ -490,7 +451,6 @@ fn activate(app: &adw::Application) {
         clock24: Cell::new(true),
         batt_short: RefCell::default(),
         home: RefCell::default(),
-        home_cpu: Cell::new(None),
     });
     let me = Rc::downgrade(&sh);
     win.connect_focus_widget_notify(move |_| {
@@ -524,7 +484,20 @@ fn activate(app: &adw::Application) {
     let home = sh.home_page();
     sh.nav.add(&home);
     win.present();
-    sh.tick_res();
+    // development: MSHIP_SHELL_PAGE=phone|performance|vm:<dir> opens that page (screenshots without touch)
+    if let Ok(want) = std::env::var("MSHIP_SHELL_PAGE") {
+        let me = Rc::downgrade(&sh);
+        glib::timeout_add_seconds_local(2, move || {
+            if let Some(s) = me.upgrade() {
+                match want.split_once(':') {
+                    Some(("vm", d)) => s.push(&vm::vm_page(&s, d)),
+                    _ if want == "performance" => s.push(&system::resources_page(&s)),
+                    _ => s.push(&settings::phone_page(&s)),
+                }
+            }
+            glib::ControlFlow::Break
+        });
+    }
     sh.refresh_vms();
     let me = Rc::downgrade(&sh);
     glib::timeout_add_seconds_local(1, move || {
@@ -546,12 +519,6 @@ fn activate(app: &adw::Application) {
     glib::timeout_add_seconds_local(60, move || {
         let Some(s) = me.upgrade() else { return glib::ControlFlow::Break };
         s.tick_store();
-        glib::ControlFlow::Continue
-    });
-    let me = Rc::downgrade(&sh);
-    glib::timeout_add_seconds_local(4, move || {
-        let Some(s) = me.upgrade() else { return glib::ControlFlow::Break };
-        s.tick_res();
         glib::ControlFlow::Continue
     });
     let me = Rc::downgrade(&sh);

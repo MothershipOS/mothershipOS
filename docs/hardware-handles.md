@@ -45,7 +45,7 @@ registers or firmware.
   owner.
 - **Revocation is mandatory:** the broker takes a handle back instantly, without the VM's cooperation (DRM lease
   revoke, `EVIOCREVOKE`/grab, tc redirect removal, broker-held fds for interfaces without revoke).
-- **Assignment:** every exclusive group has one assigned owner, mothershipOS or one VM (Settings › Hardware,
+- **Assignment:** every exclusive group has one assigned owner, mothershipOS or one VM (a VM's page › Hardware,
   `/var/lib/mothership/config/hardware.json`). Assigned groups are lent automatically: `display` and `buttons`
   while the VM is shown (they move with the screen: assist key, volume combo, Show), every other group while it
   runs, until taken back explicitly or the VM stops.
@@ -123,7 +123,7 @@ contract and caps. A reader ignores fields it doesn't know (later schemas add, n
 hardware changes. mothershipd's registry (`crates/mothershipd/src/handles.rs`) re-reads the directory every policy
 tick (a file whose process is gone is ignored), adds its own handles (display, screen power, touch, keys, shared
 internet, the external display, the GPU), groups them, and publishes the result on the `handles` topic
-(`handles.list`; `mship handles`). Handover and Settings › Hardware work from it: there is no list of hardware in
+(`handles.list`; `mship handles`). Handover and a VM's page › Hardware work from it: there is no list of hardware in
 mothershipOS's code. A new device service shows up in the UI, assignable or shared as its descriptors say, without
 a change anywhere else. When a service appears, or its file shows a new pid (a restart), mothershipd lends its groups
 (again) to the running VMs they are assigned to (`display`/`buttons` only to the shown VM); a group whose service is
@@ -232,7 +232,7 @@ slot holding both band handles shows one interface with both bands.
   `mship.gpu` `context_types`).
 - Host resources such as the vsock CID, taps and sockets are allocated by the broker, not declared.
 - `handover` (the groups a VM gets, by `when_shown` / `while_running`) is validated but not read by the running
-  system, which assigns hardware in Settings › Hardware (§2). Open decision: drop it from schema 2 or use it as the
+  system, which assigns hardware in a VM's page › Hardware (§2). Open decision: drop it from schema 2 or use it as the
   default assignment of a new VM.
 - `schema` is required. A file with a newer schema than the host knows is refused with "needs mothershipOS
   ≥ `min_mothership`". Older schemas (from schema 2 on) are migrated in memory by pure functions and written

@@ -416,7 +416,7 @@ fn serve() -> std::io::Result<()> {
     fresh(Path::new(CTL));
     let ctl = UnixDatagram::bind(CTL)?;
     for_session(Path::new(CTL), 0o660);
-    // one handle per phone audio device; the group is what Settings › Hardware assigns, the arg what attach names
+    // one handle per phone audio device; the group is what a VM's page › Hardware assigns, the arg what attach names
     publish_handles("audio", &[
         Handle::new("audio:speaker", "mship.audio", "Speaker", "audio-speakers-symbolic", Direction::Out, "speaker").control(CTL, Some("speaker")),
         Handle::new("audio:earpiece", "mship.audio", "Earpiece", "call-start-symbolic", Direction::Out, "earpiece").control(CTL, Some("earpiece")),

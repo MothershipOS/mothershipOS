@@ -6,7 +6,7 @@
 
 A fingerprint reader for one VM at a time. Handle `fingerprint:0`, group `fingerprint`, sharing `exclusive`:
 enrolled fingers are sensitive, so only the VM that holds the handle can enrol or match, and the host runs the
-sensor only on its behalf. Lent in Settings › Hardware like the other devices.
+sensor only on its behalf. Lent in a VM's page › Hardware like the other devices.
 
 The sensor and the enrolled templates live entirely in the host's secure world (the vendor Trusted Application;
 see the port's notes, e.g. motorola_nio/docs/fingerprint.md). The guest never sees image data or templates — it

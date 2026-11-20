@@ -188,6 +188,11 @@ fn address_dialog(s: &S, st: &Rc<Store>) {
 }
 
 pub fn store_page(s: &S) -> adw::NavigationPage {
+    store_page_query(s, "")
+}
+
+/// The store, its list searched for `query` (Home's search).
+pub fn store_page_query(s: &S, query: &str) -> adw::NavigationPage {
     let search = gtk::SearchEntry::builder().placeholder_text("Search VMs").hexpand(true).build();
     let g_search = group("", "");
     g_search.add(&search);
@@ -218,6 +223,10 @@ pub fn store_page(s: &S) -> adw::NavigationPage {
             address_dialog(&s, &st2);
         }
     });
+    if !query.is_empty() {
+        search.set_text(query);
+        *st.query.borrow_mut() = query.to_string();
+    }
     load(s, &st);
     // installs in progress and what is installed: every 2 s while the page is open, redrawn when it changed
     let (me, st2) = (Rc::downgrade(s), st.clone());

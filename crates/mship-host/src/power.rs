@@ -171,6 +171,14 @@ pub fn set_brightness(pct: u32, save: bool) -> Result<u32> {
     Ok(pct)
 }
 
+/// The backlight at a fraction (0..1] of its range, at the panel's full resolution (a VM's own brightness; not
+/// saved).
+pub fn set_backlight(frac: f64) -> Result<()> {
+    let mx = rd(Path::new(BACKLIGHT).join("max_brightness"), "4095").parse::<u64>().unwrap_or(4095);
+    wr(Path::new(BACKLIGHT).join("brightness"), ((frac.clamp(0.0, 1.0) * mx as f64).round() as u64).max(1))?;
+    Ok(())
+}
+
 /// At boot: the saved brightness (the backlight appears once the panel/WLED drivers probed).
 pub fn display_apply() -> Result<u32> {
     for _ in 0..60 {

@@ -1,4 +1,4 @@
-//! Resources, the raw power votes, hardware owners, VM memory, a VM's settings, about.
+//! The phone's performance (live), the raw power votes, about.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -8,12 +8,10 @@ use std::time::Instant;
 use adw::prelude::*;
 use mship_core::api::{Op, PowerState, Topic, VoteState};
 use mship_core::status::Resources;
-use serde_json::Value;
 
-use crate::ui::{Metric, Rows, button, esc, fmt_rate, group, mhz, page, row, strings};
-use mship_core::handle::Lend;
+use crate::ui::{Metric, Rows, button, esc, fmt_rate, group, mhz, page, row};
 
-use crate::{S, VMS, base, vm_conf, vm_name};
+use crate::{S, VMS};
 
 // ------------------------------------------------------------------ sampling
 /// per-CPU (busy, total) jiffies from /proc/stat; index 0 is all CPUs together
@@ -149,7 +147,17 @@ pub fn resources_page(s: &S) -> adw::NavigationPage {
     let r_cores = adw::PreferencesRow::builder().activatable(false).child(&cores).build();
     let r_temp = row("Temperatures", "…", None, false);
     let r_venus = row("Video decoder (Venus)", "…", None, false);
-    let g_sys = group("Phone", "Updated every 2 s; graphs show the last 2 minutes");
+    // the CPU mode, then the live numbers
+    let g_mode = group("", "");
+    let r_mode = row("CPU mode", "Cool / Balanced / Performance, clocks per core cluster", Some("power-profile-performance-symbolic"), true);
+    let me = Rc::downgrade(s);
+    r_mode.connect_activated(move |_| {
+        if let Some(s) = me.upgrade() {
+            s.push(&crate::settings::cpu_page(&s));
+        }
+    });
+    g_mode.add(&r_mode);
+    let g_sys = group("Now", "Updated every 2 s; graphs show the last 2 minutes. Each VM's own use is on its page.");
     g_sys.add(&m_cpu.row);
     g_sys.add(&r_cores);
     g_sys.add(&m_mem.row);
@@ -159,7 +167,6 @@ pub fn resources_page(s: &S) -> adw::NavigationPage {
     g_sys.add(&m_net.row);
     g_sys.add(&m_dsk.row);
     g_sys.add(&r_venus);
-    let vms = Rows::new(group("Virtual machines", "CPU in % of one core, as top shows it"));
     let g_top = group("Top processes", "% of one core");
     let top_rows: Vec<adw::ActionRow> = (0..6).map(|_| row("…", "", None, false)).collect();
     for r in &top_rows {
@@ -168,13 +175,9 @@ pub fn resources_page(s: &S) -> adw::NavigationPage {
     let st = Rc::new(RefCell::new(Sample { cpu: cpu_times(), t: Instant::now(), net: net_bytes(), dsk: disk_bytes(), procs: proc_ticks(), res: None }));
 
     let on_res = {
-        let (st, vms, r_venus, m_gpu) = (st.clone(), vms.clone(), r_venus.clone(), m_gpu.clone());
+        let (st, r_venus, m_gpu) = (st.clone(), r_venus.clone(), m_gpu.clone());
         Rc::new(move |r: Resources| {
             let prev = st.borrow_mut().res.replace(r.clone());
-            vms.clear();
-            if r.vms.is_empty() {
-                vms.add(&row("No VM is running", "", None, false));
-            }
             if r.venus_hz != 0 {
                 r_venus.set_subtitle(&format!("core clock {:.0} MHz", r.venus_hz as f64 / 1e6));
             }
@@ -183,12 +186,6 @@ pub fn resources_page(s: &S) -> adw::NavigationPage {
             let gpu = (100.0 * (r.gpu_ns.saturating_sub(prev.gpu_ns)) as f64 / (dt * 1e9)).min(100.0);
             let freq = rd_i64("/sys/class/devfreq/3d00000.gpu/cur_freq") as f64 / 1e6;
             m_gpu.set(&format!("{gpu:.0} %"), gpu, Some(&format!("{freq:.0} MHz")));
-            for v in &r.vms {
-                let Some(o) = prev.vms.iter().find(|o| o.dir == v.dir) else { continue };
-                let cpu = 100.0 * v.ticks.saturating_sub(o.ticks) as f64 / tck / dt;
-                let g = (100.0 * v.gpu_ns.saturating_sub(o.gpu_ns) as f64 / (dt * 1e9)).min(100.0);
-                vms.add(&row(&v.name, &format!("CPU {cpu:.0} % · RAM {:.1} GB · GPU {g:.0} %", v.pss_kb as f64 / 1048576.0), Some("computer-symbolic"), false));
-            }
         })
     };
     let ask_res = {
@@ -255,7 +252,7 @@ pub fn resources_page(s: &S) -> adw::NavigationPage {
             ask_res();
         }
     };
-    let p = page("Resources", &[&g_sys, &vms.group, &g_top], None);
+    let p = page("Performance", &[&g_mode, &g_sys, &g_top], None);
     ask_res();
     s.live(&p.page, 2, sample);
     p.page
@@ -335,247 +332,6 @@ pub fn power_page(s: &S) -> adw::NavigationPage {
     p.page
 }
 
-// ------------------------------------------------------------------ a VM's settings
-pub fn vm_page(s: &S, d: &str) -> adw::NavigationPage {
-    let path = format!("{VMS}/{d}");
-    let g_now = group("Now", "");
-    let r_state = row("State", "…", Some("computer-symbolic"), false);
-    g_now.add(&r_state);
-    let (me, dd) = (Rc::downgrade(s), d.to_string());
-    let give = button("Give now", Some("suggested-action"), move || {
-        let Some(s) = me.upgrade() else { return };
-        let (me2, dd2) = (Rc::downgrade(&s), dd.clone());
-        s.ask(Op::HandoverGive { vm: dd.clone(), items: vec![] }, move |_| {
-            if let Some(s) = me2.upgrade() {
-                s.toast(&format!("{} has its hardware", vm_name(&dd2)));
-            }
-        });
-    });
-    let me = Rc::downgrade(s);
-    let take = button("Take back", None, move || {
-        let Some(s) = me.upgrade() else { return };
-        let me2 = Rc::downgrade(&s);
-        s.ask(Op::HandoverTake { items: vec![] }, move |_| {
-            if let Some(s) = me2.upgrade() {
-                s.toast("Hardware is back with mothershipOS");
-            }
-        });
-    });
-    let r_act = row("Hardware", "lend its assigned devices now, or take everything back", None, false);
-    r_act.add_suffix(&take);
-    r_act.add_suffix(&give);
-    g_now.add(&r_act);
-    let g = group("Assigned hardware", "");
-    let assoc = s.handover().assoc;
-    let groups = s.handles().groups;
-    let assigned: Vec<_> = groups.iter().filter(|g| assoc.get(&g.name).map(String::as_str) == Some(d)).collect();
-    for gr in &assigned {
-        g.add(&row(&gr.label, if gr.lend == Lend::WhileShown { "while shown" } else { "while running" }, Some(&gr.icon), false));
-    }
-    if assigned.is_empty() {
-        g.add(&row("Nothing assigned", "everything stays with mothershipOS", None, false));
-    }
-    let r_edit = row("Change assignments", "Settings › Hardware: one owner per device", Some("drive-multidisk-symbolic"), true);
-    let me = Rc::downgrade(s);
-    r_edit.connect_activated(move |_| {
-        if let Some(s) = me.upgrade() {
-            s.push(&hw_page(&s));
-        }
-    });
-    g.add(&r_edit);
-    let upd = {
-        let (me, d) = (Rc::downgrade(s), d.to_string());
-        move || {
-            let Some(s) = me.upgrade() else { return };
-            let run = s.vm_info(&d).is_some_and(|v| v.running);
-            let own = s.handover().holders;
-            let groups = s.handles().groups;
-            let held: Vec<&str> = groups.iter().filter(|g| own.get(&g.name) == Some(&path)).map(|g| g.label.as_str()).collect();
-            r_state.set_subtitle(&esc(&format!("{}{}", if run { "running" } else { "stopped" },
-                                               if held.is_empty() { String::new() } else { format!(" · has: {}", held.join(", ").to_lowercase()) })));
-            give.set_sensitive(run);
-            take.set_sensitive(!held.is_empty());
-        }
-    };
-    upd();
-    let title = vm_conf(d)["name"].as_str().map(String::from).unwrap_or(d.to_string());
-    let p = page(&title, &[&g_now, &g], None);
-    s.follow(&p.page, &[Topic::Vms, Topic::Handover], upd);
-    p.page
-}
-
-// ------------------------------------------------------------------ hardware assignment
-/// Settings › Hardware, built from the handle registry: every assignable group with its owner, then what every VM
-/// shares. Rebuilt when the registry changes (a device service starts, stops or finds its hardware).
-pub fn hw_page(s: &S) -> adw::NavigationPage {
-    let g = group("Owner", "Each device has one owner. A VM gets its devices automatically: the screen's while it is shown, the rest while it runs. Holding both volume buttons brings the screen back to mothershipOS.");
-    let g2 = group("Shared by every VM", "Every running VM gets these, no assignment needed.");
-    let rows: Rc<RefCell<Vec<(String, Lend, adw::ComboRow)>>> = Rc::default();
-    // the rows in each group, removed on a rebuild
-    let built: Rc<RefCell<(Vec<gtk::Widget>, Vec<gtk::Widget>)>> = Rc::default();
-    let shown_list: Rc<RefCell<Option<mship_core::api::HandleList>>> = Rc::default();
-    let rebuild = {
-        let (me, g, g2, rows, built, shown_list) = (Rc::downgrade(s), g.clone(), g2.clone(), rows.clone(), built.clone(), shown_list.clone());
-        move || {
-            let Some(s) = me.upgrade() else { return };
-            let list = s.handles();
-            if shown_list.borrow().as_ref() == Some(&list) {
-                return;
-            }
-            {
-                let mut b = built.borrow_mut();
-                for w in b.0.drain(..) {
-                    g.remove(&w);
-                }
-                for w in b.1.drain(..) {
-                    g2.remove(&w);
-                }
-            }
-            rows.borrow_mut().clear();
-            let vms: Vec<String> = s.vm_list().into_iter().map(|v| v.vm).collect();
-            let mut owners = vec!["host".to_string()];
-            owners.extend(vms.iter().cloned());
-            let mut labels = vec!["mothershipOS".to_string()];
-            labels.extend(vms.iter().map(|d| vm_name(d)));
-            let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-            let assoc = s.handover().assoc;
-            for gr in &list.groups {
-                let cr = adw::ComboRow::builder().title(esc(&gr.label)).model(&strings(&label_refs)).build();
-                cr.add_prefix(&gtk::Image::from_icon_name(&gr.icon));
-                cr.set_sensitive(gr.present);
-                let cur = assoc.get(&gr.name).cloned().unwrap_or_else(|| "host".into());
-                cr.set_selected(owners.iter().position(|o| *o == cur).unwrap_or(0) as u32);
-                let (me, owners, labels, key, title) = (Rc::downgrade(&s), owners.clone(), labels.clone(), gr.name.clone(), gr.label.clone());
-                cr.connect_selected_notify(move |w| {
-                    let Some(s) = me.upgrade() else { return };
-                    let i = w.selected() as usize;
-                    if s.handover().assoc.get(&key).map(String::as_str).unwrap_or("host") == owners[i] {
-                        return; // the row was set to what is already assigned
-                    }
-                    let (me2, label, title) = (Rc::downgrade(&s), labels[i].clone(), title.clone());
-                    s.ask(Op::HandoverAssign { item: key.clone(), owner: owners[i].clone() }, move |_| {
-                        if let Some(s) = me2.upgrade() {
-                            s.toast(&format!("{title} → {label}"));
-                        }
-                    });
-                });
-                g.add(&cr);
-                built.borrow_mut().0.push(cr.clone().upcast());
-                rows.borrow_mut().push((gr.name.clone(), gr.lend, cr));
-            }
-            for h in list.handles.iter().map(|i| &i.handle).filter(|h| h.lend == Lend::EveryVm) {
-                let r = row(&h.label, &h.summary(), Some(&h.icon), false);
-                r.set_sensitive(h.present);
-                g2.add(&r);
-                built.borrow_mut().1.push(r.upcast());
-            }
-            *shown_list.borrow_mut() = Some(list);
-        }
-    };
-    let upd = {
-        let (me, rows, rebuild) = (Rc::downgrade(s), rows.clone(), rebuild.clone());
-        move || {
-            rebuild();
-            let Some(s) = me.upgrade() else { return };
-            let h = s.handover();
-            let groups = s.handles().groups;
-            for (key, lend, r) in rows.borrow().iter() {
-                let holder = h.holders.get(key).cloned().unwrap_or_else(|| "host".into());
-                let owner = h.assoc.get(key).cloned().unwrap_or_else(|| "host".into());
-                let summary = groups.iter().find(|g| &g.name == key).map(|g| g.summary.clone()).unwrap_or_default();
-                let text = if !groups.iter().any(|g| &g.name == key && g.present) {
-                    "not present".to_string()
-                } else if holder != "host" {
-                    format!("in use by {}", vm_name(base(&holder)))
-                } else if owner != "host" {
-                    format!("{} · lent while it {}", vm_name(&owner), if *lend == Lend::WhileShown { "is shown" } else { "runs" })
-                } else {
-                    format!("mothershipOS · {summary}")
-                };
-                r.set_subtitle(&esc(&text));
-            }
-        }
-    };
-    upd();
-    let p = page("Hardware", &[&g, &g2], None);
-    s.follow(&p.page, &[Topic::Handover, Topic::Handles, Topic::Vms], upd);
-    p.page
-}
-
-// ------------------------------------------------------------------ VM memory
-/// A VM's RAM limit (MB): vm.json resources.memory_mb, None = the whole pool
-fn vm_mem(d: &str) -> Option<u64> {
-    vm_conf(d)["resources"]["memory_mb"].as_u64()
-}
-
-/// resources.memory_mb into the VM's vm.json (None removes it), keeping everything else (atomic replace)
-fn vm_set_mem(d: &str, mb: Option<u64>) -> std::io::Result<()> {
-    let path = format!("{VMS}/{d}/vm.json");
-    let mut conf = vm_conf(d);
-    if !conf.is_object() {
-        conf = Value::Object(Default::default());
-    }
-    if !conf["resources"].is_object() {
-        conf["resources"] = Value::Object(Default::default());
-    }
-    let r = conf["resources"].as_object_mut().unwrap();
-    match mb {
-        Some(mb) => r.insert("memory_mb".into(), mb.into()),
-        None => r.remove("memory_mb"),
-    };
-    let tmp = format!("{path}.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&conf).unwrap_or_default() + "\n")?;
-    std::fs::rename(tmp, path)
-}
-
-pub fn vm_mem_page(s: &S) -> adw::NavigationPage {
-    let total = meminfo().get("MemTotal").copied().unwrap_or(0) / 1024;
-    let pool = mship_core::pool::vm_size_mb(total, None);
-    let vms: Vec<String> = s.vm_list().into_iter().filter(|v| v.manifest).map(|v| v.vm).collect();
-    let g = group("Memory and CPUs", &format!("VMs share the phone: each may use all {} CPUs and up to {:.1} GB of RAM \
-        (the phone's {:.1} GB less what mothershipOS needs), taking what it uses as it runs. VMs that are awake share \
-        alike, whichever one is shown; a VM whose screen is off gets less CPU time and gives back memory first. A \
-        limit caps one VM's RAM; it applies the next time the VM starts.",
-        mship_core::pool::host_cpus().len(), pool as f64 / 1024.0, total as f64 / 1024.0));
-    for d in &vms {
-        let limit = vm_mem(d);
-        let ex = adw::ExpanderRow::new();
-        ex.set_title(&esc(&vm_name(d)));
-        ex.set_show_enable_switch(true);
-        ex.set_enable_expansion(limit.is_some());
-        ex.set_expanded(limit.is_some());
-        let running = s.vm_info(d).is_some_and(|v| v.running);
-        let sub = move |on: bool| format!("{}{}", if on { "Limited" } else { "Shares the pool" },
-                                          if running { " · running: restart it to apply" } else { "" });
-        ex.set_subtitle(&sub(limit.is_some()));
-        ex.add_prefix(&gtk::Image::from_icon_name(if d == "pixelos" { "phone-symbolic" } else { "computer-symbolic" }));
-        let min = mship_core::pool::GUEST_MIN_MB as f64;
-        let adj = gtk::Adjustment::new(limit.unwrap_or(pool) as f64, min, pool.max(min as u64) as f64, 256.0, 1024.0, 0.0);
-        let sp = adw::SpinRow::new(Some(&adj), 256.0, 0);
-        sp.set_title("Limit");
-        sp.set_subtitle("MB");
-        ex.add_row(&sp);
-        let save = {
-            let (me, d, ex, sp) = (Rc::downgrade(s), d.clone(), ex.clone(), sp.clone());
-            Rc::new(move || {
-                let on = ex.enables_expansion();
-                ex.set_subtitle(&sub(on));
-                if let (Err(e), Some(s)) = (vm_set_mem(&d, on.then(|| sp.value() as u64)), me.upgrade()) {
-                    s.toast(&format!("Could not save: {e}"));
-                }
-            })
-        };
-        let f = save.clone();
-        ex.connect_enable_expansion_notify(move |_| f());
-        sp.connect_value_notify(move |_| save());
-        g.add(&ex);
-    }
-    if vms.is_empty() {
-        g.add(&row("No virtual machines", "", None, false));
-    }
-    page("Virtual machines", &[&g], None).page
-}
-
 // ------------------------------------------------------------------ about
 pub fn about_page(_s: &S) -> adw::NavigationPage {
     let g = group("", "");
@@ -597,5 +353,15 @@ pub fn about_page(_s: &S) -> adw::NavigationPage {
     ] {
         g.add(&row(t, &sub, None, false));
     }
-    page("About", &[&g], None).page
+    // diagnostics
+    let g_diag = group("", "");
+    let r_votes = row("Power votes", "diagnostic: the raw mship.power table", Some("utilities-terminal-symbolic"), true);
+    let me = Rc::downgrade(_s);
+    r_votes.connect_activated(move |_| {
+        if let Some(s) = me.upgrade() {
+            s.push(&power_page(&s));
+        }
+    });
+    g_diag.add(&r_votes);
+    page("About", &[&g, &g_diag], None).page
 }
