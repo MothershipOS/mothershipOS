@@ -47,7 +47,7 @@ registers or firmware.
   revoke, `EVIOCREVOKE`/grab, tc redirect removal, broker-held fds for interfaces without revoke).
 - **Assignment:** every exclusive group has one assigned owner, mothershipOS or one VM (a VM's page › Hardware,
   `/var/lib/mothership/config/hardware.json`). Assigned groups are lent automatically: `display` and `buttons`
-  while the VM is shown (they move with the screen: assist key, volume combo, Show), every other group while it
+  while the VM is shown (they move with the screen: holding the assist key, Show), every other group while it
   runs, until taken back explicitly or the VM stops.
 - **Groups** are what the user lends: `display` (display + display-power + touch + power key = "the screen"),
   `buttons` (volume keys), `wifi-2g`, `wifi-5g` (one Wi-Fi band each, native control), `internet` (shared
@@ -61,7 +61,7 @@ registers or firmware.
 
 ## 2a. Lifecycle and release
 Every handle attachment goes through: `empty → attached → releasing → empty`.
-- **Release reasons:** `user` (taken back in the UI or with `mship handover take`), `screen` (assist key, volume combo,
+- **Release reasons:** `user` (taken back in the UI or with `mship handover take`), `screen` (holding the assist key,
   Show of another VM: only `display` and `buttons`), `stop` (VM stopped or crashed), `revoked` (policy, e.g. the
   host needs its last uplink), `gone` (hardware disappeared).
 - **Release is immediate and unconditional.** The VM's cooperation is never awaited. Channel contracts get a
@@ -80,7 +80,7 @@ Every handle attachment goes through: `empty → attached → releasing → empt
 | display | newest guest frame within one refresh; panel off if the guest's last power state is OFF | nothing (frames still accepted and dropped, pacing continues) | panel back to the host compositor, on |
 | display-power | guest's state applied | its lines are ignored | host screen-power policy |
 | touch | only contacts that start after attach | every active contact **cancelled**: `ABS_MT_TOOL_TYPE=MT_TOOL_PALM` + `SYN`, then tracking id -1, `BTN_TOUCH` 0, `SYN` (Android: `ACTION_CANCEL`; libinput: ignored palm) | touch to the host compositor |
-| keys | power: one `KEY_WAKEUP` press/release; keys already held are not delivered | every key the guest saw pressed gets a release (autorepeat stops); the volume combo's presses are released before the take-back acts | keys handled by the host |
+| keys | power: one `KEY_WAKEUP` press/release (`KEY_POWER` if the guest's display is still off 2 s later); keys already held are not delivered | every key the guest saw pressed gets a release (autorepeat stops) | keys handled by the host |
 | internet | carrier on, DHCP, forwarding opens | forwarding closes and the link loses carrier: the network disappears (Android switches to Wi-Fi instead of preferring a dead "Ethernet") | — |
 | wifi band | band available in the guest (rfkill unblocked); the guest's supplicant connects on its own | host deauthenticates and deletes keys on that band's interface, flushes its scan results; the guest sees a disconnect (reason: local deauth) and the band as rfkill soft-blocked; pending scans/connects fail | interface returns to the host (NetworkManager may connect it) |
 | bluetooth | controller reset; a guest HAL waiting for its `HCI_Reset` gets it answered, otherwise a Hardware Error event restarts the guest's stack | host sends `HCI_Reset` (every link ends) and takes the controller back; the guest gets a Hardware Error event | controller back to BlueZ, which restores its power state |

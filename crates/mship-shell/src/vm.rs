@@ -158,7 +158,7 @@ fn hardware(s: &S, d: &str, rows: &Rows, open: &Rc<RefCell<HashSet<String>>>) {
     }
     let shared: Vec<&str> = list.handles.iter().map(|i| &i.handle).filter(|h| h.lend == Lend::EveryVm).map(|h| h.label.as_str()).collect();
     rows.group.set_description(Some(&esc(&format!(
-        "A VM gets its devices while it runs, the screen while it is shown; holding both volume buttons brings the screen back.{}",
+        "A VM gets its devices while it runs, the screen while it is shown; holding the assist key for 3 s brings the screen back.{}",
         if shared.is_empty() { String::new() } else { format!(" Every VM shares: {}.", shared.join(", ")) }
     ))));
 }

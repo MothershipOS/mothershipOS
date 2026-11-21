@@ -14,15 +14,14 @@ output DP-1 disable
 # workspace 1 = mothershipOS shell, workspace 2 = a VM shown as a window
 for_window [title="^crosvm$"] move container to workspace number 2
 # terminals: a workspace of their own, split (not tabbed: no tab bar over them); the shell shows the on-screen
-# keyboard while one is focused and goes back to workspace 1 when the last one closes; the assist key goes home too
+# keyboard while one is focused and goes back to workspace 1 when the last one closes; holding the assist key goes home too
 for_window [app_id="^foot$"] move container to workspace terminal, workspace terminal, layout splitv
 # the panel's camera cutout: the top of the terminal stays empty
 workspace terminal gaps top 60
 # on-screen keyboard (layer shell; the shell shows/hides it with SIGUSR2/SIGUSR1)
 exec wvkbd-mobintl --hidden -H 300 -L 220
 exec /usr/local/bin/mship-shell
-# assist key = home: take the hardware back to mothershipOS, or lend it to the running VM
-bindsym --locked XF86Search exec /usr/local/bin/mship home
+# the assist key is unbound: holding it for 3 s goes home (mothershipd reads it)
 # power key = screen off/on (sleep follows via mothershipd); idle timeout from Settings › Display
 bindsym --locked XF86PowerOff exec /usr/local/bin/mship screen toggle
 exec /usr/local/bin/mship idle

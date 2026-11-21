@@ -11,6 +11,7 @@ mod brightness;
 mod cpuguard;
 mod handles;
 mod handover;
+mod homekey;
 mod hub;
 mod pool;
 mod power;
@@ -55,6 +56,30 @@ fn power_key(v: &serde_json::Value) -> serde_json::Value {
     k
 }
 
+/// A VM given the display wakes: lending it sends KEY_WAKEUP (mship-inputd), which wakes Android but not every OS
+/// (Sailfish OS's mce wakes on the power key only). A guest still blanked a moment later gets one power key press;
+/// one awake by then is left alone (the power key would blank it).
+fn wake_shown(power: &Arc<power::Power>, shown: &Arc<Mutex<String>>, holder: &str) {
+    let mut cur = shown.lock().unwrap();
+    if *cur == holder {
+        return;
+    }
+    *cur = holder.to_string();
+    if holder == "host" {
+        return;
+    }
+    let (power, shown, d) = (power.clone(), shown.clone(), holder.to_string());
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let vm = d.rsplit('/').next().unwrap_or(&d).to_string();
+        if *shown.lock().unwrap() == d && power.guest_screen(&vm) == Some(false) {
+            println!("{vm}: still blanked when shown: power key");
+            let ctl = std::path::Path::new(&d).join("input.ctl");
+            let _ = std::os::unix::net::UnixDatagram::unbound().and_then(|s| s.send_to(b"power", &ctl));
+        }
+    });
+}
+
 impl Daemon {
     fn new() -> Arc<Self> {
         let hub = Arc::new(hub::Hub::default());
@@ -69,8 +94,11 @@ impl Daemon {
         let h = hub.clone();
         let brightness = brightness::Brightness::new();
         let b = brightness.clone();
+        let p = power.clone();
+        let shown: Arc<Mutex<String>> = Arc::default();
         let handover = Arc::new(handover::Handover::new(handles.clone(), move |st| {
             b.follow(&st.holders); // the panel's brightness follows the display
+            wake_shown(&p, &shown, st.holders.get("display").map_or("host", String::as_str));
             h.set(Topic::Handover, serde_json::to_value(st).unwrap_or_default());
         }));
         let pool = Arc::new(pool::Pool::new());
@@ -123,6 +151,7 @@ impl Daemon {
             }
         });
         self.power.start();
+        homekey::start(self.handover.clone()); // holding the assist key: home
         let me = self.clone();
         std::thread::Builder::new().name("host-status".into()).spawn(move || me.host_loop()).unwrap();
         println!("mothershipd {} running", mship_core::RELEASE);

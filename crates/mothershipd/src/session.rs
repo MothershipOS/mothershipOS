@@ -189,6 +189,11 @@ fn sway_conn() -> std::io::Result<Sway> {
     Sway::connect(Path::new(sock))
 }
 
+/// The focused workspace's name, if sway answers.
+pub fn focused_workspace() -> Option<String> {
+    sway_conn().and_then(|mut s| s.focused_workspace()).ok().flatten()
+}
+
 /// sway's outputs (names), or None if sway does not answer.
 pub fn outputs() -> Option<Vec<String>> {
     let o = sway_conn().and_then(|mut s| s.outputs()).ok()?;

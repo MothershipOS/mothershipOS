@@ -1,7 +1,7 @@
 //! mship: the mothershipOS command line. Everything goes through mothershipd (root, or the session user mship);
 //! results are printed as JSON.
 //!
-//! Bound in the session: the assist key runs `mship home`, the power key `mship screen toggle`, and sway starts
+//! Bound in the session: the power key runs `mship screen toggle`, and sway starts
 //! `mship idle` (swayidle with the screen timeout, Settings › Display).
 
 use std::os::unix::process::CommandExt;
@@ -41,8 +41,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: HandoverCmd,
     },
-    /// the assist key: from a terminal back to the shell; else take the screen back, or lend it to the running VM
-    Home,
     /// the phone's screen
     Screen {
         #[command(subcommand)]
@@ -183,17 +181,6 @@ fn run(cmd: Cmd) -> Result<Value, String> {
             HandoverCmd::Toggle => Op::HandoverToggle,
             HandoverCmd::Assign { item, owner } => Op::HandoverAssign { item, owner },
         },
-        Cmd::Home => {
-            // on the terminals' workspace while the host has the screen: home is the shell
-            let host_shows = mship_core::client::call(Op::HandoverStatus).is_ok_and(|h| h["display"] == "host");
-            if host_shows
-                && let Ok(mut s) = mship_core::sway::Sway::session()
-                && s.focused_workspace().ok().flatten().as_deref() == Some("terminal")
-            {
-                return s.command("workspace number 1").map(|_| Value::Null).map_err(|e| e.to_string());
-            }
-            Op::HandoverToggle
-        }
         Cmd::Screen { cmd } => match cmd {
             ScreenCmd::On => Op::ScreenSet { on: true },
             ScreenCmd::Off => Op::ScreenSet { on: false },

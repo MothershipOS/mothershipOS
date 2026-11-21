@@ -464,6 +464,11 @@ impl Power {
         }
     }
 
+    /// A VM's guest display as its presenter last saw it (None: not heard of).
+    pub fn guest_screen(&self, vm: &str) -> Option<bool> {
+        self.inner.lock().unwrap().screens.get(vm).copied()
+    }
+
     pub fn set_vote(&self, participant: &str, r: VoteRequest) {
         self.inner.lock().unwrap().entries.insert(participant.into(), vote_from(r, "host-agent"));
     }

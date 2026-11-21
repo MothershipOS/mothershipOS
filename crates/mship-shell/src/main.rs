@@ -209,7 +209,7 @@ impl Shell {
         g_phone.add(&phone);
 
         // the VMs: a search of the store, the installed ones, the store
-        let vms = Rows::new(group("Virtual machines", "Tap a VM for its hardware, performance and settings. The assist key or holding both volume buttons returns here."));
+        let vms = Rows::new(group("Virtual machines", "Tap a VM for its hardware, performance and settings. Holding the assist key for 3 s returns here."));
         let search = gtk::SearchEntry::builder().placeholder_text("Find VMs to install").hexpand(true).build();
         let me = Rc::downgrade(self);
         search.connect_activate(move |e| {

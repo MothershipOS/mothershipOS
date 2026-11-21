@@ -18,13 +18,13 @@
 //! - `display on|off`: touchscreen grabbed for / released from the VM
 //! - `buttons on|off`: volume keys forwarded to / no longer forwarded to the VM
 //! - `pause|resume`: screen off: drop touches (no pocket input) without changing ownership
+//! - `power`: one power key press (mothershipd: the VM is shown but its guest stayed blanked)
 //!
 //! A device that goes away (the power key's driver is rebound by mship-pwrkey-rearm; any driver reprobe) is found
 //! again by its name (the new event node) and gets its grab back; until then it is left out (a dead fd would wake
 //! the loop for ever).
 //!
-//! Holding both volume buttons for MSHIP_HANDOVER_HOLD seconds (1) while the VM has the display takes the display
-//! and buttons back to mothershipOS (a lent Wi-Fi stays with the VM), whether or not the buttons are lent.
+//! The way home (holding the assist key) is mothershipd's, not this bridge's.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -45,6 +45,7 @@ const EV_ABS: u16 = 3;
 const VOLDOWN: u16 = 114;
 const VOLUP: u16 = 115;
 const KEY_WAKEUP: u16 = 143;
+const KEY_POWER: u16 = 116;
 
 type Ev = (u16, u16, i32);
 
@@ -236,6 +237,12 @@ impl Bridge {
             ["display", v] => self.st.display = *v == "on",
             ["buttons", v] => self.st.buttons = *v == "on",
             ["pause"] => self.st.paused = true,
+            // mothershipd: the guest is still blanked though shown (KEY_WAKEUP did not wake it): one power key press
+            ["power"] if self.st.display => {
+                self.send(KEYS, &[(EV_KEY, KEY_POWER, 1), (EV_SYN, 0, 0), (EV_KEY, KEY_POWER, 0), (EV_SYN, 0, 0)]);
+                log("power key (wake)");
+                return;
+            }
             ["resume"] => self.st.paused = false,
             _ => {}
         }
@@ -251,7 +258,6 @@ fn main() {
         std::process::exit(2);
     }
     let d = Path::new(&a[1]).to_path_buf();
-    let hold = Duration::from_secs_f64(std::env::var("MSHIP_HANDOVER_HOLD").ok().and_then(|h| h.parse().ok()).unwrap_or(1.0));
     let open = |p: &str| Dev::open(p).unwrap_or_else(|e| {
         eprintln!("mship-inputd: {p}: {e}");
         std::process::exit(1);
@@ -268,8 +274,7 @@ fn main() {
         held: BTreeMap::new(),
         shown: false,
     };
-    let mut combo_fired = false;
-    log(&format!("ready: touch {}, keys {}, power {}, hold {}s", a[2], a[3], a.get(4).map_or("-", |s| s), hold.as_secs_f64()));
+    log(&format!("ready: touch {}, keys {}, power {}", a[2], a[3], a.get(4).map_or("-", |s| s)));
     loop {
         let mut fds = vec![ctl.as_raw_fd(), b.touch.fd()];
         fds.extend(b.keys.iter().map(Dev::fd));
@@ -277,7 +282,7 @@ fn main() {
         let listening: Vec<usize> = (0..2).filter(|k| b.conn[*k].is_none()).collect();
         fds.extend(listening.iter().map(|k| socks[*k].as_raw_fd()));
         let mut pfds: Vec<libc::pollfd> = fds.iter().map(|&fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 }).collect();
-        let timeout = if b.held.len() == 2 && !combo_fired { 100 } else if b.st.retry { 500 } else { -1 };
+        let timeout = if b.st.retry { 500 } else { -1 };
         unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout) };
         let ready = |fd: RawFd| fd >= 0 && pfds.iter().any(|p| p.fd == fd && p.revents != 0);
         // a device that went away: POLLERR/POLLHUP/POLLNVAL for ever, until it is dropped
@@ -340,33 +345,14 @@ fn main() {
                         b.held.insert(code, Instant::now());
                     } else if val == 0 {
                         b.held.remove(&code);
-                        if b.held.is_empty() {
-                            combo_fired = false;
-                        }
                     }
-                    if !combo_fired {
-                        out.push((t, code, val));
-                    }
+                    out.push((t, code, val));
                 }
             }
             if b.st.buttons && !out.is_empty() {
                 out.push((EV_SYN, 0, 0));
                 b.send(KEYS, &out);
             }
-        }
-        // both volume buttons held: the screen back to mothershipOS
-        if b.held.len() == 2 && !combo_fired && b.st.display && b.held.values().max().is_some_and(|t| t.elapsed() >= hold) {
-            combo_fired = true;
-            if b.st.buttons {
-                b.send(KEYS, &[(EV_KEY, VOLUP, 0), (EV_KEY, VOLDOWN, 0), (EV_SYN, 0, 0)]);
-            }
-            log("volume buttons held: returning hardware to mothershipOS");
-            // its own thread: mothershipd answers after telling this bridge (input.ctl)
-            std::thread::spawn(|| {
-                if let Err(e) = mship_core::client::call(Op::HandoverTake { items: vec!["display".into(), "buttons".into()] }) {
-                    log(&format!("mothershipd: {e}"));
-                }
-            });
         }
     }
 }

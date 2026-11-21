@@ -1,4 +1,12 @@
-//! A desktop Linux (Ubuntu 26.04) under crosvm, on the external display.
+//! A Linux VM under crosvm (platform efi-virt-arm64): its own kernel, on the screen its manifest names.
+//!
+//! - vm.json "output": "DP-1" (default) = the external display, as below; "DSI-1" = the phone's panel: one display
+//!   at the panel's size and density shown through a DRM lease while the VM holds the display, touch and buttons
+//!   through mship-inputd while lent (a phone OS: Sailfish OS, postmarketOS); the buttons are a buttons device
+//!   (power, volume, wake), not a keyboard
+//! - kernel parameters: root=/dev/vda1 (unless boot.params names root=) rootfstype=ext4 rootwait console=hvc0
+//!   <boot.params, default "ro quiet splash">
+//! - network: one card (mship_core::vmnet), online while the VM holds the shared internet (mship-net)
 //!
 //! - GPU: virtio-gpu DRM native context (the guest's Mesa freedreno drives the host Adreno through our
 //!   virglrenderer's msm renderer, as PixelOS), cross-domain for buffer allocation; virgl too, for the 2D buffers of
@@ -27,7 +35,12 @@ use std::time::Duration;
 use mship_core::api::Op;
 use mship_core::uevent::{poll, read_uevent, uevents};
 
-use crate::{CROSVM, GPU_LIBS, PRESENTER, Res, Vm, camera_nodes, daemon, env_or, err, log_file, signal, sway, venus_decoder, wait_for};
+use crate::{CROSVM, GPU_LIBS, INPUTD, PRESENTER, Res, Vm, camera_nodes, daemon, env_or, err, evdev, log_file, net_args, signal, sway, venus_decoder, wait_for};
+
+/// The guest's buttons device (crosvm `--input custom`): power, volume, wake (mship-inputd sends these on keys.sock)
+const BUTTONS: &str = r#"{"name": "mothership buttons", "serial_name": "mship-buttons",
+ "events": [{"event_type": "EV_KEY", "event_type_code": 1,
+             "supported_events": {"KEY_VOLUMEDOWN": 114, "KEY_VOLUMEUP": 115, "KEY_POWER": 116, "KEY_WAKEUP": 143}}]}"#;
 
 const VHOST_SOUND: &str = "/usr/local/bin/vhost-device-sound";
 /// where releases before 2026.1's VM packages put the guests' kernel (VMs installed then name none)
@@ -38,6 +51,8 @@ pcm.!default { type asym; playback.pcm { type plug; slave.pcm "mship_dp_mix" } c
 ctl.!default { type hw; card mothershipniosp }
 "#;
 const EXT: &str = "DP-1";
+const PANEL_OUT: &str = "DSI-1";
+const PANEL: (u32, u32) = (1080, 2520);
 
 fn drm_dp(file: &str) -> Option<String> {
     std::fs::read_dir("/sys/class/drm").ok()?.flatten().find_map(|e| {
@@ -136,18 +151,23 @@ fn follow_monitor(vm: &Arc<Vm>, vm_pid: u32) {
 pub fn run(vm: &Arc<Vm>) -> Res<i32> {
     let d = vm.dir.clone();
     let ds = vm.dir_str();
-    // first start of a new VM: cloud-init's NoCloud seed over HTTP on the VM's own tap
+    let panel = vm.conf["output"].as_str() == Some(PANEL_OUT);
+    // first start of a new VM: cloud-init's NoCloud seed over HTTP on the host's address on the VM's internet card
+    // (there once the shared internet is attached: the server waits for it)
     let mut ds_param = String::new();
     if d.join("seed").is_dir() && !d.join("seed/used").exists() {
-        crate::seed::serve(d.join("seed"), "192.168.98.1:8123", vm.stop.clone())?;
-        ds_param = " ds=nocloud;s=http://192.168.98.1:8123/".into();
+        let (ip, _, _) = mship_core::vmnet::internet_addrs(vm.conf["cid"].as_u64().unwrap_or(4) as u32);
+        crate::seed::serve(d.join("seed"), &format!("{ip}:8123"), vm.stop.clone())?;
+        ds_param = format!(" ds=nocloud;s=http://{ip}:8123/");
     }
-    // vm.json "boot": {"params": "..."}: more kernel parameters (debugging)
-    if let Some(p) = vm.conf["boot"]["params"].as_str() {
-        ds_param = format!("{ds_param} {p}");
-    }
-    for f in ["display.sock", "crosvm.sock", "sound.sock"] {
+    let params = vm.conf["boot"]["params"].as_str().unwrap_or("ro quiet splash");
+    // boot.params may name the root device itself (root=...); else the disk's first partition
+    let root = if params.split_whitespace().any(|p| p.starts_with("root=")) { String::new() } else { "root=/dev/vda1 ".into() };
+    for f in ["display.sock", "crosvm.sock", "sound.sock", "touch.sock", "keys.sock", "input.ctl"] {
         let _ = std::fs::remove_file(d.join(f));
+    }
+    if panel {
+        return run_panel(vm, &format!("{root}rootfstype=ext4 rootwait console=hvc0 {params}{ds_param}"));
     }
     // copy: the presenter scans out its own GPU copy of each frame (the guest's flips complete at once and it
     // would draw into the buffer still on screen: tearing)
@@ -196,10 +216,9 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
 
     let mut args: Vec<String> = vec![
         "--log-level=info".into(), "run".into(), "--name".into(), vm.name.clone(), "--disable-sandbox".into(),
-        "--params".into(), format!("root=/dev/vda1 rootfstype=ext4 rootwait ro console=hvc0 quiet splash{ds_param}"),
+        "--params".into(), format!("{root}rootfstype=ext4 rootwait console=hvc0 {params}{ds_param}"),
         "--block".into(), format!("path={ds}/{}", vm.conf["boot"]["disk"].as_str().unwrap_or("hdd.raw")),
         format!("--serial=type=file,path={ds}/serial.log,hardware=virtio-console,num=1,console=true"),
-        "--net".into(), "tap-name=ubtap0,mac=52:54:00:12:34:56".into(),
         "--vsock".into(), format!("cid={}", vm.conf["cid"].as_u64().unwrap_or(4)),
         "--wayland-sock".into(), format!("{ds}/display.sock"),
         // virgl2: rutabaga starts virglrenderer's GL renderer only with it (the 2D buffers of the boot splash and the
@@ -208,6 +227,7 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
         "--gpu".into(), "backend=virglrenderer,context-types=virgl:virgl2:drm:cross-domain,egl=true,gles=true,no-display=true".into(),
         "--socket".into(), format!("{ds}/crosvm.sock"),
     ];
+    args.extend(net_args(vm)?);
     args.extend(vm.pool_args());
     args.extend(snd);
     // battery slot (mship.battery): goldfish battery our crosvm feeds from mship-battery
@@ -244,6 +264,61 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
         });
     }
     follow_monitor(vm, child.id());
+    let status = child.wait().map_err(err)?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// On the phone's panel (vm.json "output": "DSI-1"): as PixelOS's display and input, a plain Linux boot.
+fn run_panel(vm: &Arc<Vm>, params: &str) -> Res<i32> {
+    let d = vm.dir.clone();
+    let ds = vm.dir_str();
+    // touch + volume keys + power key, reach the VM only while lent
+    let touch = std::env::var("MSHIP_VM_TOUCH").ok().or_else(|| evdev("NT36672C Touchscreen")).unwrap_or_default();
+    let keys = std::env::var("MSHIP_VM_KEYS").ok()
+        .unwrap_or_else(|| format!("{},{}", evdev("gpio-keys").unwrap_or_default(), evdev("pm8941_resin").unwrap_or_default()));
+    let pwr = std::env::var("MSHIP_VM_POWER").ok().unwrap_or_else(|| {
+        [evdev("pm8941_pwrkey"), evdev("NT36672C Wake Gesture")].into_iter().flatten().collect::<Vec<_>>().join(",")
+    });
+    let log = log_file(&d, "inputd")?;
+    vm.helpers.spawn("inputd", Command::new(INPUTD).args([&ds, &touch, &keys, &pwr])
+        .stdout(log.try_clone().map_err(err)?).stderr(log))?;
+    wait_for(&d.join("keys.sock"), 30);
+    // the phone's buttons as a phone's, not a keyboard: a guest takes a full keyboard for a hardware one (Sailfish
+    // OS then hides its on-screen keyboard, and its mce reads the power key only from a buttons device)
+    std::fs::write(d.join("buttons.json"), BUTTONS).map_err(err)?;
+    // the panel through a DRM lease; a GPU copy per frame (the guest's page flips are not fenced to the scanout)
+    let log = log_file(&d, "display")?;
+    vm.helpers.spawn("presenter", Command::new(PRESENTER).arg(d.join("display.sock"))
+        .env("MSHIP_VM_PRESENT", env_or("MSHIP_VM_PRESENT", "copy"))
+        .stdout(log.try_clone().map_err(err)?).stderr(log))?;
+    wait_for(&d.join("display.sock"), 30);
+    let hz = env_or("MSHIP_VM_REFRESH", "60");
+    let mut args: Vec<String> = vec![
+        "--log-level=info".into(), "run".into(), "--name".into(), vm.name.clone(), "--disable-sandbox".into(),
+        "--params".into(), params.into(),
+        "--block".into(), format!("path={ds}/{}", vm.conf["boot"]["disk"].as_str().unwrap_or("hdd.raw")),
+        format!("--serial=type=file,path={ds}/serial.log,hardware=virtio-console,num=1,console=true"),
+        "--vsock".into(), format!("cid={}", vm.conf["cid"].as_u64().unwrap_or(4)),
+        "--socket".into(), format!("{ds}/crosvm.sock"),
+        "--wayland-sock".into(), format!("{ds}/display.sock"),
+        "--gpu".into(), format!("backend=virglrenderer,context-types=virgl:virgl2:drm:cross-domain,egl=true,gles=true,\
+                                 displays=[[mode=windowed[{},{}],dpi=[420,420],refresh-rate={hz}]]", PANEL.0, PANEL.1),
+        format!("--input=multi-touch[path={ds}/touch.sock,width={},height={},name=NT36672C]", PANEL.0, PANEL.1),
+        format!("--input=custom[path={ds}/keys.sock,config-path={ds}/buttons.json]"),
+    ];
+    args.extend(net_args(vm)?);
+    args.extend(vm.pool_args());
+    if vm.conf["slots"]["battery"].is_object() {
+        args.extend(["--battery".into(), "type=goldfish".into()]);
+    }
+    let kernel = vm.conf["boot"]["kernel"].as_str().map(|k| vm.path(k)).unwrap_or_else(|| OLD_GUEST_KERNEL.into());
+    if !kernel.exists() {
+        return Err(format!("{}: no kernel (vm.json boot.kernel)", kernel.display()));
+    }
+    args.push(kernel.to_string_lossy().into());
+    let mut child = Command::new(CROSVM).args(&args).env("LD_LIBRARY_PATH", GPU_LIBS).spawn().map_err(|e| format!("crosvm: {e}"))?;
+    println!("{}: crosvm {} (panel)", vm.name, child.id());
+    vm.lend_when_shown(child.id(), Some(Duration::from_secs(60)));
     let status = child.wait().map_err(err)?;
     Ok(status.code().unwrap_or(1))
 }

@@ -52,7 +52,7 @@ the stock chain (LPASS bring-up, SMMU identity mappings, CMD-DB/SMEM sharing)
   speaker, earpiece, headset, microphone, location, external display) has one assigned owner, mothershipOS or one
   VM, set in a VM's page › Hardware. `mothershipd` lends assigned groups automatically: display and buttons while the
   VM is shown, the rest while it runs. Shared handles (GPU, battery, sensors) go to every VM and have no owner.
-- The assist key, holding both volume buttons, or Show in the shell move the screen.
+- Holding the assist key for 3 s, or Show in the shell, moves the screen.
 - `mothershipd` drives the device services over their control sockets; its API is
   `/run/mothership/mothershipd.sock` (CLI `mship`). The general model (handles, slots, revocation, lowest generic
   Linux level per device class) is [hardware-handles.md](hardware-handles.md).

@@ -14,14 +14,14 @@
 - Volume keys reach the guest while the `buttons` group is attached.
 - `KEY_POWER` reaches the guest while the `display` group is attached (the guest owns its screen power, see
   `mship.display-power`).
-- When the `display` group is attached, the host sends one `KEY_WAKEUP` press and release.
-- Holding both volume keys for 1 s is reserved by the host (it takes the screen back). Those presses are
-  released in the guest when the host acts.
+- When the `display` group is attached, the host sends one `KEY_WAKEUP` press and release; a guest whose display
+  is still off 2 s later gets one `KEY_POWER` press and release (an OS that wakes on the power key only).
+- The assist key never reaches the guest: holding it for 3 s is the host's way home (the screen back to
+  mothershipOS, or lent to the running VM again).
 
 **Attach:** keys already held at attach time are not delivered until released.
 **Release (any reason):** every key the guest saw pressed gets a release event before anything else, so
-autorepeat stops. For the volume take-back combo, both volume releases reach the guest before the take-back
-acts. (Linux key events have no cancel; a release is the defined end.)
+autorepeat stops. (Linux key events have no cancel; a release is the defined end.)
 **Empty:** no events.
 
 **History:** 1.0 (2026.1) initial.
