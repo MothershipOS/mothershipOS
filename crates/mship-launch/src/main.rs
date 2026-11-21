@@ -258,6 +258,12 @@ pub fn wait_for(path: &Path, tries: u32) -> bool {
 }
 
 /// A log file for a helper: the previous run's kept as <name>.prev.log.
+/// crosvm's `--net` for each of the VM's network cards, in order (mship_core::vmnet: blank until a handle is attached).
+pub fn net_args(vm: &Vm) -> Res<Vec<String>> {
+    let net = mship_core::vmnet::load(&vm.name).ok_or_else(|| format!("{}: no network (mothershipd brings it up at start)", vm.name))?;
+    Ok(net.nics.iter().flat_map(|n| ["--net".to_string(), format!("tap-name={},mac={}", n.tap, n.mac)]).collect())
+}
+
 pub fn log_file(d: &Path, name: &str) -> Res<File> {
     let p = d.join(format!("{name}.log"));
     if std::fs::metadata(&p).is_ok_and(|m| m.len() > 0) {
@@ -440,6 +446,28 @@ impl Vm {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(f) = self.before_release.lock().unwrap().take() {
             f(self);
+        }
+        // the VMM (our child) ends with us: a launcher stopped while its guest ignores the power button must not
+        // leave crosvm running
+        let me = std::process::id().to_string();
+        let children: Vec<u32> = std::fs::read_dir("/proc").into_iter().flatten().flatten()
+            .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+            .filter(|p| std::fs::read_to_string(format!("/proc/{p}/stat")).ok()
+                .and_then(|s| s.rsplit_once(')').map(|(_, r)| r.split_whitespace().nth(1).map(String::from)))
+                .flatten().as_deref() == Some(me.as_str()))
+            .filter(|p| std::fs::read_to_string(format!("/proc/{p}/comm")).is_ok_and(|c| c.trim() == "crosvm"))
+            .collect();
+        for p in &children {
+            signal(*p, libc::SIGTERM);
+        }
+        for _ in 0..50 {
+            if !children.iter().any(|p| signal(*p, 0)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        for p in children.iter().filter(|p| signal(**p, 0)) {
+            signal(*p, libc::SIGKILL);
         }
         daemon(Op::HandoverRelease { vm: self.dir_str() }); // only this VM's: other VMs keep theirs
         self.helpers.stop_all();

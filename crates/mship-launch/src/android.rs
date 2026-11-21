@@ -10,7 +10,8 @@
 //! - battery: goldfish battery fed from mship-battery; usb: crosvm xHCI via crosvm.sock (mship-usb)
 //! - sound (mship.audio): virtio-snd into the VM's PipeWire sink; mship-audio routes it to the speaker while lent
 //! - console slots (bluetooth hvc5, GNSS hvc6, sensors hvc13): the launcher's relays to the device services (`slots`),
-//!   hot-pluggable; network: taps pxmtap0/pxetap0/pxwtap0/pxwltap0 (mship-vm-net)
+//!   hot-pluggable; network: four cards (mship_core::vmnet: mobile data, ethernet, Wi-Fi, native Wi-Fi), each given
+//!   its network by its handle's service while attached
 //! - adb: `adb connect vsock:3:5555`; logs: kernel.log (hvc0), logcat.log (hvc2), serial.log (UART)
 
 use std::collections::BTreeMap;
@@ -144,7 +145,7 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
     }
     let ds = vm.dir_str();
     let mut args: Vec<String> = vec![
-        "--log-level=info".into(), "run".into(), "--name".into(), "pixelos".into(), "--disable-sandbox".into(),
+        "--log-level=info".into(), "run".into(), "--name".into(), vm.name.clone(), "--disable-sandbox".into(),
         "--initrd".into(), initrd.to_string_lossy().into(),
         "--params".into(), std::fs::read_to_string(p.join("cmdline.crosvm")).map_err(|e| format!("cmdline.crosvm: {e}"))?.trim().into(),
         "--block".into(), format!("path={ds}/disk.img"),
@@ -176,9 +177,8 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
     args.extend(["--socket".into(), format!("{ds}/crosvm.sock")]);
     args.extend(audio_slot(vm)?);
     args.extend(vm.pool_args());
-    for tap in ["tap-name=pxmtap0", "tap-name=pxetap0", "tap-name=pxwtap0", "tap-name=pxwltap0,mac=02:6d:73:00:00:03"] {
-        args.extend(["--net".into(), tap.into()]);
-    }
+    // the VM's network cards: mobile data, ethernet, Wi-Fi, native Wi-Fi (blank until their handles are attached)
+    args.extend(crate::net_args(vm)?);
     args.extend([
         "--wayland-sock".into(), format!("{ds}/display.sock"),
         "--gpu".into(), format!("{gpu}{},displays=[[mode=windowed[{},{}],dpi=[420,420],refresh-rate={hz}]]",
@@ -196,7 +196,7 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
         cmd.env("LD_PRELOAD", format!("{CF_LIBS}/libGLESv2.so")).env("MSHIP_ZC_SOCK", format!("{ds}/display.sock-zc"));
     }
     let mut child = cmd.spawn().map_err(|e| format!("crosvm: {e}"))?;
-    println!("pixelos: crosvm {} ({})", child.id(), if native { "native context" } else { "gfxstream" });
+    println!("{}: crosvm {} ({})", vm.name, child.id(), if native { "native context" } else { "gfxstream" });
     vm.lend_when_shown(child.id(), Some(Duration::from_secs(60)));
     let status = child.wait().map_err(err)?;
     Ok(status.code().unwrap_or(1))

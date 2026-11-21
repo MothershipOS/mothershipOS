@@ -1,6 +1,8 @@
 [Unit]
 Description=mothershipOS host daemon (mothershipd: VMs, hardware handover, power, host status and settings; API for the shell)
-After=multi-user.target
+# early: the shell waits for it. VMs need only their taps (mship-vm-net); device services come and go (hot)
+After=mship-vm-net.service
+Wants=mship-vm-net.service
 
 [Service]
 ExecStart=/usr/local/sbin/mothershipd

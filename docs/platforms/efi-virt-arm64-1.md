@@ -1,21 +1,27 @@
 # Platform efi-virt-arm64 1.x
 
-Runs an arm64 desktop Linux guest from a disk image (Ubuntu 26.04 desktop:
-[ubuntu_26.04_desktop_VM](https://github.com/MothershipOS/ubuntu_26.04_desktop_VM)). The host implements it with
+Runs an arm64 Linux guest from a disk image: a desktop on the external display (Ubuntu 26.04 desktop:
+[ubuntu_26.04_desktop_VM](https://github.com/MothershipOS/ubuntu_26.04_desktop_VM)) or a phone OS on the panel
+(`"output": "DSI-1"`). The host implements it with
 crosvm; the VMM is not part of the contract.
 
 - **Works:** the Ubuntu desktop boots by direct kernel boot and runs with every device below (the state of each
   slot is in its contract).
 - **Needs work:**
-  - Networking is always on (NATed), not a lendable `mship.net-shared` slot.
+  - The panel layout (`"output": "DSI-1"`) has no sound and no display power from the guest yet; no guest has been
+    booted on it yet.
   - Sound is a virtio-snd device played on the external display's audio (DisplayPort), not `mship.audio` handles.
   - The vsock CID comes from `vm.json` instead of being allocated.
-- **Not implemented:** UEFI boot (AAVMF with a persistent variable store); `mship.touch` and `mship.keys`;
-  `mship.gnss`, `mship.sensors` and `mship.modem` slots.
+- **Not implemented:** UEFI boot (AAVMF with a persistent variable store); `mship.gnss`, `mship.sensors` and
+  `mship.modem` slots.
 
 **Boot:** the VM's own kernel `boot.kernel` (from its package, [vm-packages.md](../vm-packages.md)), booted directly
-with the disk `boot.disk`, root on its first partition (`/dev/vda1`, ext4). No initrd: the guest kernel has its
-drivers built in. `boot.params` adds kernel parameters (debugging).
+with the disk `boot.disk`. Kernel parameters: `root=/dev/vda1 rootfstype=ext4 rootwait console=hvc0 <boot.params>` (default
+`ro quiet splash`; `boot.params` with its own `root=` replaces the first). No initrd: the guest kernel has its drivers built in.
+
+**Screen (`output`):** `"DP-1"` (default): the external display, below. `"DSI-1"`: the phone's panel: one display of
+1080x2520 at 420 dpi, shown while the VM holds the `display` item; multi-touch (`mship.touch`, "NT36672C") and a
+keyboard device with the volume and power keys (`mship.keys`), both only while lent.
 
 **Devices the guest can rely on:**
 | Device | Detail |
@@ -27,7 +33,7 @@ drivers built in. `boot.params` adds kernel parameters (debugging).
 | USB | `mship.usb`: crosvm's xHCI; keyboard and mouse are the monitor's or dock's USB devices |
 | video decode | the host's hardware decoder as a V4L2 device through virtio-media |
 | cameras | `mship.camera`: virtio-media devices after the decoder's |
-| network | one virtio-net device (tap, NATed) |
+| network | one virtio-net card (`internet`, `crates/mship-core/src/vmnet.rs`): blank (no carrier) until the VM holds the shared internet (`mship.net-shared`: DHCP, NAT out of the phone's uplink) |
 | vsock | one vsock device; CID from `vm.json` `"cid"` (default 4); `mship.power` on host port 7720 |
 | console | virtio-console `hvc0` (the host keeps it as `serial.log`) |
 

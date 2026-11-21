@@ -10,7 +10,7 @@
 //! "display_mode": "lease" (crosvm + mship-vm-display) get the panel itself: sway leases the DSI connector to the VM's
 //! presenter (`swaymsg lease_output DSI-1 on`) and gets it back on take. Other VMs: their window fullscreen at scale
 //! 1. Either way the host idle timeout is off while a VM has the display, and touch goes to the VM (its input bridge,
-//! `<vm dir>/input.ctl`). buttons = volume keys. internet = shared internet (the phone's uplink NATed to the VM).
+//! `<vm dir>/input.ctl`). buttons = volume keys. internet = shared internet (mship-net).
 //! display-ext = the USB-C external display (DP-1), leased to the VM's presenter; sway itself never uses it.
 
 use std::collections::BTreeMap;
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use mship_core::api::HandoverState;
 use mship_core::handle::Lend;
 use mship_host::util::{Result, fail, load_value};
-use mship_host::{vm, wifi};
+use mship_host::vm;
 
 use crate::handles::Registry;
 use crate::session;
@@ -228,9 +228,6 @@ impl Handover {
         for item in &items {
             let holder = holder(i, item);
             match *item {
-                "internet" => {
-                    let _ = wifi::owner_set("wifi", "host");
-                }
                 "display-ext" => {
                     session::sway(&["lease_output", EXT_OUT, "off"]); // revokes only this output's lease
                 }
@@ -271,12 +268,6 @@ impl Handover {
             let item = item.as_str();
             if self.reg.group(item).is_none() {
                 continue; // its service isn't running (the assignment stays for when it is)
-            }
-            if item == "internet" {
-                if holder != d && wifi::owner_set("wifi", &format!("vm:{d}")).is_ok() {
-                    i.st.insert(item.into(), d.clone()); // replaces any other VM's NAT
-                }
-                continue;
             }
             if item == "display-ext" {
                 if holder != "host" && holder != d {
@@ -350,7 +341,7 @@ impl Handover {
         self.take_locked(&mut i, &held)
     }
 
-    /// The assist key: take the screen back, or lend it to the running VM.
+    /// Home (holding the assist key): take the screen back, or lend it to the running VM.
     pub fn toggle(&self) -> BTreeMap<String, String> {
         let mut i = self.inner.lock().unwrap();
         if i.changed_at.is_some_and(|t| t.elapsed() < DEBOUNCE) {

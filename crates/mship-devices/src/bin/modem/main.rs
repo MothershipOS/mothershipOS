@@ -13,7 +13,7 @@
 //! modem slot (`at`) in the Cuttlefish modem simulator's dialect (`radio`), answered from the modem's state over QMI
 //! (`nas`: network and signal; WMS: incoming SMS; VOICE: call events) or passed to the modem's AT port where it is
 //! standard 27.007. Its data calls are sessions on their own mux (`cellvm<cid>`) routed to the VM's data NIC
-//! (cuttlefish-arm64: the first NIC, tap pxmtap0), in the kernel. While lent, the host has no mobile data.
+//! (the holder's `cellular` card: mship_core::vmnet), in the kernel. While lent, the host has no mobile data.
 //!
 //! Control: datagrams on /run/mothership/modem.sock, one reply each: `attach <vm>` (by its directory name),
 //! `detach <vm> [user|screen|stop|revoked|gone]`, `status`. Configuration (optional): /etc/mothership/modem.json
@@ -71,8 +71,10 @@ const HOST_RELEASE: Duration = Duration::from_secs(5);
 /// a VM's context <cid>: mux VM_MUX + cid, link cellvm<cid>, routing table VM_TABLE + cid
 const VM_MUX: u8 = 10;
 const VM_TABLE: u32 = 1700;
-/// cuttlefish-arm64's mobile data NIC (the guest's buried_eth0)
-const VM_DATA_TAP: &str = "pxmtap0";
+/// The holder's mobile data card (mship_core::vmnet)
+fn data_tap(vm: &str) -> Option<String> {
+    mship_core::vmnet::load(vm)?.card("cellular").map(|n| n.tap.clone())
+}
 const CHAIN: &str = "MSHIP_CELL";
 /// legacy iptables (the kernel has no nf_tables)
 const IPT: &str = "iptables-legacy";
@@ -154,6 +156,8 @@ struct Session {
     gw: Ipv4Addr,
     dns: Vec<Ipv4Addr>,
     mtu: u32,
+    /// a VM's call: the VM's mobile data tap
+    tap: String,
 }
 
 impl Session {
@@ -202,6 +206,7 @@ fn start_session(wds_at: (u32, u32), target: Target, mux: u8, iface: &str) -> Re
     let mut ses = Session {
         wds, handle, iface: iface.into(), addr, prefix: mask.count_ones(), gw: ip(0x20).unwrap_or(Ipv4Addr::UNSPECIFIED),
         dns: [ip(0x15), ip(0x16)].into_iter().flatten().collect(), mtu: s.u32(0x29).filter(|m| *m >= 576).unwrap_or(1500),
+        tap: String::new(),
     };
     if let Err(e) = run("ip", &["link", "set", iface, "mtu", &ses.mtu.to_string(), "up"]) {
         ses.stop();
@@ -233,23 +238,29 @@ fn host_down(iface: &str) {
 /// tap, its traffic out of the link (its own routing table), forwarding allowed for exactly that address; the host
 /// answers the guest's ARP for anything (proxy ARP), so the guest needs no real gateway.
 fn vm_route(cid: u8, s: &Session, up: bool) {
+    if s.tap.is_empty() {
+        return;
+    }
+    let tap = s.tap.as_str();
     let a = s.addr.to_string();
     let table = (VM_TABLE + cid as u32).to_string();
     let (rt, ipt) = if up { ("replace", "-A") } else { ("del", "-D") };
     if up {
         forward_first();
-        sysctl(&format!("net.ipv4.conf.{VM_DATA_TAP}.proxy_arp"), "1");
+        // the VM's card has carrier while a data call is routed to it (blank otherwise: mship_core::vmnet)
+        let _ = run("ip", &["link", "set", tap, "up"]);
+        sysctl(&format!("net.ipv4.conf.{tap}.proxy_arp"), "1");
         sysctl(&format!("net.ipv4.conf.{}.rp_filter", s.iface), "0");
-        let _ = run("ip", &["rule", "del", "from", &a, "iif", VM_DATA_TAP, "table", &table]);
+        let _ = run("ip", &["rule", "del", "from", &a, "iif", tap, "table", &table]);
     }
     let rule = if up { "add" } else { "del" };
     let tbl = format!("{a}/32");
     let steps: [(&str, Vec<&str>); 5] = [
-        ("ip", vec!["rule", rule, "from", &a, "iif", VM_DATA_TAP, "table", &table, "priority", &table]),
-        ("ip", vec!["route", rt, &tbl, "dev", VM_DATA_TAP]),
+        ("ip", vec!["rule", rule, "from", &a, "iif", tap, "table", &table, "priority", &table]),
+        ("ip", vec!["route", rt, &tbl, "dev", tap]),
         ("ip", vec!["route", rt, "default", "dev", &s.iface, "table", &table]),
-        (IPT, vec![ipt, CHAIN, "-i", VM_DATA_TAP, "-o", &s.iface, "-s", &a, "-j", "ACCEPT"]),
-        (IPT, vec![ipt, CHAIN, "-i", &s.iface, "-o", VM_DATA_TAP, "-d", &a, "-j", "ACCEPT"]),
+        (IPT, vec![ipt, CHAIN, "-i", tap, "-o", &s.iface, "-s", &a, "-j", "ACCEPT"]),
+        (IPT, vec![ipt, CHAIN, "-i", &s.iface, "-o", tap, "-d", &a, "-j", "ACCEPT"]),
     ];
     for (cmd, args) in steps {
         // taking a context down: whatever is already gone is fine; bringing it up: every step is needed
@@ -280,8 +291,10 @@ fn stale_routes() {
             let _ = run("ip", &["route", "flush", "table", &pref.to_string()]);
         }
     }
-    if exists(VM_DATA_TAP) {
-        let _ = run("ip", &["route", "flush", "dev", VM_DATA_TAP, "scope", "link"]);
+    for tap in mship_core::vmnet::all().iter().filter_map(|n| n.card("cellular")).map(|n| n.tap.clone()) {
+        if exists(&tap) {
+            let _ = run("ip", &["route", "flush", "dev", &tap, "scope", "link"]);
+        }
     }
 }
 
@@ -835,7 +848,11 @@ impl Modem {
             r = self.data_path().and_then(|wds| start_session(wds, Target::Apn(&apn), VM_MUX + cid, &iface));
         }
         match r {
-            Ok(s) => {
+            Ok(mut s) => {
+                s.tap = self.lent.as_deref().and_then(data_tap).unwrap_or_default();
+                if s.tap.is_empty() {
+                    log(format!("data: context {cid}: {} has no mobile data card", self.lent.as_deref().unwrap_or("?")));
+                }
                 vm_route(cid, &s, true);
                 log(format!("data: context {cid} for {}: {}/{} on {iface}", self.lent.as_deref().unwrap_or("?"), s.addr, s.prefix));
                 self.vm.insert(cid, s);
@@ -881,6 +898,10 @@ impl Modem {
         for (c, mut s) in std::mem::take(&mut self.vm) {
             s.stop();
             vm_route(c, &s, false);
+        }
+        // its card blank again
+        if let Some(tap) = data_tap(vm) {
+            let _ = run("ip", &["link", "set", &tap, "down"]);
         }
         if let Some(cid) = self.at.owner.take() {
             self.at.kick(cid);

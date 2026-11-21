@@ -84,7 +84,7 @@ holds it, the host has no mobile data.
   `/var/lib/mothership/modem/efs-backup`), SIM provisioning and ICCID (QMI UIM), IMEI (DMS), incoming SMS (WMS:
   transfer routes, acks), call events (VOICE), voice domain CS preferred (NAS, until the modem's next power cycle),
   the host's data (`cell0`, QMI WDS on QMAP mux 1, metric 700), a VM's data calls as WDS sessions by APN on mux
-  10+cid (`cellvm<cid>`), routed in the kernel to tap `pxmtap0` (policy routing, proxy ARP, forwarding chain
+  10+cid (`cellvm<cid>`), routed in the kernel to the VM's `cellular` interface (vm.json `"network"`, `crates/mship-core/src/vmnet.rs`) (policy routing, proxy ARP, forwarding chain
   `MSHIP_CELL` kept ahead of `mship-vm-net`'s).
 - `nas.rs`: the network from QMI NAS (serving system, signal info with thresholds, PLMN names).
 - `radio.rs`: the dialect (pure: commands to answers / modem pass-through, state changes to unsolicited results,

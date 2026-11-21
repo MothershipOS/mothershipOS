@@ -1,5 +1,5 @@
 //! The handle registry: every handle the device services publish (mship_core::handle, /run/mothership/handles) and
-//! mothershipd's own (the screen, the buttons, shared internet, the external display, the GPU), grouped into what the
+//! mothershipd's own (the screen, the buttons, the external display, the GPU), grouped into what the
 //! user assigns. Re-read every policy tick; a change is published on the `handles` topic.
 
 use std::collections::BTreeMap;
@@ -27,8 +27,6 @@ fn builtins() -> Vec<Handle> {
         Handle::new("keys:volume", "mship.keys", "Volume buttons", "audio-volume-high-symbolic", Direction::In, "buttons")
             .while_shown()
             .caps(json!({"keys": [114, 115]})),
-        Handle::new("internet:uplink", "mship.net-shared", "Shared internet", "network-transmit-receive-symbolic", Direction::Both, "internet")
-            .caps(json!({"ipv4": true})),
         Handle::new("display:dp0", "mship.display", "External display (USB-C)", "video-joined-displays-symbolic", Direction::Out, "display-ext"),
         Handle::new("gpu:0", "mship.gpu", "GPU", "video-display-symbolic", Direction::Both, "").every_vm(None)
             .caps(json!({"context_types": ["drm", "cross-domain", "virgl", "gfxstream-gles", "gfxstream-composer"]})),

@@ -34,6 +34,7 @@ const PROGRAMS: &[(&str, &str)] = &[
     ("mship-camera", "usr/local/sbin"),
     ("mship-gnss", "usr/local/sbin"),
     ("mship-modem", "usr/local/sbin"),
+    ("mship-net", "usr/local/sbin"),
     ("mship-sensors", "usr/local/sbin"),
     ("mship-usb", "usr/local/sbin"),
     ("mship-wifi-bridge", "usr/local/sbin"),

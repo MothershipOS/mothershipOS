@@ -9,10 +9,6 @@ use crate::util::{Result, fail, load_value, run, save_json};
 
 pub const IFACE: &str = "wlp1s0";
 const OWNERS: &str = "/run/mothership/owners.json";
-/// the guest's eth2 -> virt_wifi wlan0 (mship-vm-net)
-const VM_WIFI_TAP: &str = "pxwtap0";
-const VM_WIFI_NET: &str = "192.168.96.0/24";
-const VM_TAPS: &[&str] = &["pxwtap0", "pxetap0", "pxmtap0"];
 
 /// Split one `nmcli -t` line (':' separated, '\:' and '\\' escaped).
 pub fn nm_split(line: &str) -> Vec<String> {
@@ -52,34 +48,6 @@ pub fn owner_name(owner: &str) -> String {
     }
 }
 
-fn ipt(args: &[&str]) -> bool {
-    run("iptables-legacy", args).ok()
-}
-
-/// VM internet through the phone's Wi-Fi. The host keeps the radio and its connection (it is the uplink); the VM's
-/// wifi tap is NATed out of the Wi-Fi interface while lent. Chains MSHIP_VM (filter FORWARD, nat POSTROUTING) come
-/// from mship-vm-net at boot; whatever is not lent is dropped.
-fn vm_net(lent: bool) -> Result<()> {
-    if !ipt(&["-n", "-L", "MSHIP_VM"]) {
-        return fail("VM networking is not set up (mship-vm-net.service)");
-    }
-    ipt(&["-F", "MSHIP_VM"]);
-    ipt(&["-t", "nat", "-F", "MSHIP_VM"]);
-    if lent {
-        ipt(&["-A", "MSHIP_VM", "-i", VM_WIFI_TAP, "-o", IFACE, "-j", "ACCEPT"]);
-        ipt(&["-A", "MSHIP_VM", "-i", IFACE, "-o", VM_WIFI_TAP, "-m", "conntrack", "--ctstate",
-              "ESTABLISHED,RELATED", "-j", "ACCEPT"]);
-        ipt(&["-t", "nat", "-A", "MSHIP_VM", "-s", VM_WIFI_NET, "-o", IFACE, "-j", "MASQUERADE"]);
-    }
-    for tap in VM_TAPS {
-        ipt(&["-A", "MSHIP_VM", "-i", tap, "-j", "DROP"]);
-    }
-    // an unlent internet slot has no carrier: the network disappears in the guest (Android would otherwise keep
-    // preferring a validated-looking Ethernet over native Wi-Fi), and existing flows fail at once
-    run("ip", &["link", "set", "dev", VM_WIFI_TAP, if lent { "up" } else { "down" }]);
-    Ok(())
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OwnerChange {
     pub device: String,
@@ -88,7 +56,7 @@ pub struct OwnerChange {
     pub previous: String,
 }
 
-/// Who uses a device; today only "wifi" (the uplink as a VM's shared internet).
+/// Who uses a device; today only "wifi" (the uplink as a VM's shared internet: mship-net records it here).
 pub fn owner_set(dev: &str, owner: &str) -> Result<OwnerChange> {
     if dev != "wifi" {
         return fail(format!("unknown device {dev}"));
@@ -99,7 +67,6 @@ pub fn owner_set(dev: &str, owner: &str) -> Result<OwnerChange> {
     }
     let mut o = owners();
     let previous = o.insert(dev.into(), owner.into()).unwrap_or_else(|| "host".into());
-    vm_net(owner != "host")?;
     // older builds released the interface for a VM: make sure mothershipOS manages it
     run("nmcli", &["device", "set", IFACE, "managed", "yes"]);
     save_json(OWNERS, &o)?;

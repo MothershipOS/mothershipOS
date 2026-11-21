@@ -10,7 +10,8 @@
 //! Control: datagrams on /run/mothership/wifi-bridge.sock, one reply each: `attach <cid> <band>` (lend a band
 //! handle, 2g or 5g, to the VM with that vsock CID), `detach <cid> [user|screen|stop|revoked|gone]`, `status`.
 //!
-//! Configuration: /etc/mothership/wifi-bridge.json (VMs by CID: tap, initial MAC; phy; band interface names).
+//! Configuration: /etc/mothership/wifi-bridge.json (phy; band interface names). A VM's tap and initial MAC: its
+//! `wifi` card (mship_core::vmnet), found by its vsock CID.
 //! Bands are lent by mothershipd (hardware assignment); a lend that arrives before the VM's driver connects is kept
 //! and applied at its hello. One band per VM at a time (two station interfaces with the same MAC are not allowed
 //! by mac80211).
@@ -201,14 +202,19 @@ struct Conf {
     phy: String,
     /// band -> its interface
     bands: BTreeMap<String, String>,
-    vms: BTreeMap<u32, VmConf>,
+}
+
+/// The VM with this vsock CID: its native Wi-Fi card (mship_core::vmnet) and the MAC its wlan0 starts with.
+fn vm_conf(cid: u32) -> Option<VmConf> {
+    let net = mship_core::vmnet::by_cid(cid)?;
+    let n = net.card("wifi")?;
+    Some(VmConf { name: net.vm.clone(), tap: n.tap.clone(), mac: n.mac.clone() })
 }
 
 fn conf() -> Conf {
     let mut c = json!({
         "phy": "phy0",
         "bands": {"2g": {"iface": "mshw2g"}, "5g": {"iface": "mshw5g"}},
-        "vms": {"3": {"name": "pixelos", "tap": "pxwltap0", "mac": "02:6d:73:00:00:03"}},
     });
     if let Some(Value::Object(o)) = std::fs::read_to_string(CONF).ok().and_then(|s| serde_json::from_str(&s).ok()) {
         for (k, v) in o {
@@ -218,18 +224,6 @@ fn conf() -> Conf {
     Conf {
         phy: c["phy"].as_str().unwrap_or("phy0").into(),
         bands: c["bands"].as_object().into_iter().flatten().filter_map(|(b, v)| Some((b.clone(), v["iface"].as_str()?.to_string()))).collect(),
-        vms: c["vms"]
-            .as_object()
-            .into_iter()
-            .flatten()
-            .filter_map(|(cid, v)| {
-                Some((cid.parse().ok()?, VmConf {
-                    name: v["name"].as_str().unwrap_or("?").into(),
-                    tap: v["tap"].as_str()?.into(),
-                    mac: v["mac"].as_str().unwrap_or("02:6d:73:00:00:03").into(),
-                }))
-            })
-            .collect(),
     }
 }
 
@@ -309,7 +303,9 @@ impl Bridge {
         let s = st.sessions.get_mut(&cid).unwrap();
         let prepared = band_iface_prepare(&self.conf.phy, &iface, &s.mac)
             .map_err(|e| e.1)
-            .and_then(|idx| redirect(&iface, &s.vm.tap, true).and_then(|_| redirect(&s.vm.tap, &iface, true)).map(|_| idx));
+            .and_then(|idx| redirect(&iface, &s.vm.tap, true).and_then(|_| redirect(&s.vm.tap, &iface, true)).map(|_| idx))
+            // the VM's card has carrier while a band is attached (it is blank otherwise: mship_core::vmnet)
+            .and_then(|idx| run("ip", &["link", "set", &s.vm.tap, "up"]).map(|_| idx));
         match prepared {
             Ok(idx) => {
                 s.ifidx = idx;
@@ -330,6 +326,7 @@ impl Bridge {
         let _ = self.nl(n::CMD_DISCONNECT, &[nla_u32(n::ATTR_IFINDEX, s.ifidx), nla_u16(n::ATTR_REASON_CODE, 3)].concat());
         let _ = redirect(&iface, &s.vm.tap, false);
         let _ = redirect(&s.vm.tap, &iface, false);
+        let _ = run("ip", &["link", "set", &s.vm.tap, "down"]);
         let _ = run("ip", &["link", "set", "dev", &iface, "down"]);
         if s.connected || s.connecting {
             s.send(mw::DISCONNECTED, 0, &[a_u16(mw::A_REASON, 3), a_u8(mw::A_LOCALLY_GENERATED, 1)].concat());
@@ -883,7 +880,7 @@ fn serve() -> std::io::Result<()> {
     for conn in l.incoming() {
         let Ok(conn) = conn else { continue };
         let cid = conn.peer_addr().map(|a| a.cid()).unwrap_or(0);
-        let Some(vm) = b.conf.vms.get(&cid).cloned() else {
+        let Some(vm) = vm_conf(cid) else {
             log(format!("cid {cid}: no Wi-Fi slot configured, closing"));
             continue;
         };

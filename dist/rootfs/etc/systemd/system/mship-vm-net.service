@@ -1,7 +1,8 @@
 [Unit]
 Description=mothershipOS VM networking (taps, DHCP; internet via the hardware handover)
-After=network-online.target
-Wants=network-online.target
+# taps, their addresses, the NAT chains and DHCP on the taps: nothing needs an uplink (NetworkManager leaves px* and
+# ub* alone), so no waiting for the network to be online (NetworkManager-wait-online took ~9 s of the boot)
+After=local-fs.target
 
 [Service]
 Type=oneshot

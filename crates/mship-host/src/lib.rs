@@ -9,6 +9,7 @@ pub mod resources;
 pub mod ssh;
 pub mod util;
 pub mod vm;
+pub mod vmnet;
 pub mod wifi;
 
 use mship_core::status::{GuardState, HostStatus, SshSummary};

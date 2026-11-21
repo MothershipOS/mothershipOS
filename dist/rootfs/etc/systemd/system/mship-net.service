@@ -1,0 +1,12 @@
+[Unit]
+Description=mothershipOS shared internet (mship.net-shared: the phone's uplink for one VM)
+After=mship-vm-net.service
+Wants=mship-vm-net.service
+
+[Service]
+ExecStart=/usr/local/sbin/mship-net
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

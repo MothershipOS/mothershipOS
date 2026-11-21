@@ -1,5 +1,7 @@
 //! VM lifecycle: the VMs on the phone, starting them (their launcher, as the session user in the session's
 //! environment), stopping them (cleanly: woken first if asleep, then the guest's own power-off) and showing them.
+//! A VM's network cards (blank taps, the same for every VM of its platform: mship_core::vmnet) are made before its
+//! launcher starts and removed once it has stopped, however it stopped; the handles' services fill them.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -8,7 +10,7 @@ use std::time::Duration;
 
 use mship_core::api::{ShowResult, VmInfo, VmList};
 use mship_host::util::{Result, fail, load_value};
-use mship_host::vm;
+use mship_host::{vm, vmnet as hvmnet};
 
 use crate::handover::Handover;
 use crate::pool::Pool;
@@ -69,6 +71,14 @@ impl Vms {
     /// Publish when a VM started, stopped or changed.
     pub fn tick(&self) {
         let st = self.scan();
+        // the networks of VMs that have stopped (not those starting: their launcher is not up yet)
+        let busy = self.busy.lock().unwrap().clone();
+        for net in mship_core::vmnet::all() {
+            if !busy.contains_key(&net.vm) && !st.vms.iter().any(|v| v.vm == net.vm && v.running) {
+                hvmnet::down(&net.vm);
+                println!("{}: network down", net.vm);
+            }
+        }
         let mut cur = self.state.lock().unwrap();
         if *cur != st {
             *cur = st.clone();
@@ -104,11 +114,22 @@ impl Vms {
             let prev = s.strip_suffix(".log").map(|b| format!("{b}.prev.log")).unwrap_or_else(|| format!("{s}.prev"));
             let _ = std::fs::rename(&log, prev);
         }
+        // its network cards first (the launcher reads them); "starting" before, so the tick doesn't remove them meanwhile
+        self.set_busy(name, Some("starting"));
+        match hvmnet::up(name, &c) {
+            Ok(n) => println!("{name}: network {}", n.nics.iter().map(|x| format!("{} {}", x.kind, x.tap)).collect::<Vec<_>>().join(", ")),
+            Err(e) => {
+                self.set_busy(name, None);
+                return fail(format!("{name}: network: {e}"));
+            }
+        }
         let dir = d.to_string_lossy().into_owned();
         // in its own cgroup: the pool weighs its CPU share
-        session::spawn_in(&[&launcher], &[("MSHIP_VM_DIR", &dir)], Some(&log), self.pool.cgroup(name).as_deref())?;
+        if let Err(e) = session::spawn_in(&[&launcher], &[("MSHIP_VM_DIR", &dir)], Some(&log), self.pool.cgroup(name).as_deref()) {
+            self.set_busy(name, None); // the tick takes its network down
+            return Err(e.into());
+        }
         println!("{name}: starting ({launcher})");
-        self.set_busy(name, Some("starting"));
         let me = self.clone();
         let name = name.to_string();
         std::thread::spawn(move || {
