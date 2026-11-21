@@ -1,0 +1,3 @@
+# DRM devices as systemd device units, so the host compositor can wait for its KMS device (mship-sway.service:
+# the display controller registers seconds into the boot, after the GPU)
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", TAG+="systemd"

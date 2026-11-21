@@ -1,7 +1,10 @@
 [Unit]
 Description=mothershipOS host compositor (sway on DSI-1)
 Requires=seatd.service
-After=seatd.service systemd-user-sessions.service getty@tty1.service
+# not after systemd-user-sessions (it waits for the network): the session is a service with seatd, not a login;
+# after the KMS device (WLR_DRM_DEVICES below) has registered (80-mship-drm-systemd.rules)
+After=seatd.service getty@tty1.service dev-dri-card1.device
+Wants=dev-dri-card1.device
 Conflicts=getty@tty1.service
 
 [Service]
