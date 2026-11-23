@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mship_core::api::{ShowResult, VmInfo, VmList};
+use mship_core::device;
 use mship_host::util::{Result, fail, load_value};
 use mship_host::{vm, vmnet as hvmnet};
 
@@ -54,7 +55,7 @@ impl Vms {
                     running: vm::running(&d),
                     busy: busy.get(&name).cloned(),
                     display_mode: c["display_mode"].as_str().map(String::from),
-                    output: c["output"].as_str().unwrap_or("DSI-1").into(),
+                    output: c["output"].as_str().unwrap_or("panel").into(),
                     workspace: c["workspace"].as_u64().unwrap_or(2) as u32,
                     memory_mb: c["resources"]["memory_mb"].as_u64(),
                     vm: name,
@@ -173,25 +174,26 @@ impl Vms {
         let d = vm::vm_dir(name)?;
         let conf = load_value(d.join("vm.json"));
         let c = conf.clone().unwrap_or_default();
-        if conf.is_some() && c["output"].as_str().unwrap_or("DSI-1") != "DSI-1" {
+        if conf.is_some() && !device::is_panel(c["output"].as_str().unwrap_or("panel")) {
             // its screen is another display (External display in a VM's page › Hardware): the panel stays as it is
             return Ok(ShowResult { message: Some(format!("{} is on the external display", c["name"].as_str().unwrap_or(name))) });
         }
         if c["display_mode"].as_str() == Some("window") {
             // a window in the host's compositor, on its workspace (sway config: 3 = the external display if any)
             let ws = c["workspace"].as_u64().unwrap_or(2).to_string();
-            if ws == "3" && session::outputs().is_some_and(|o| o.iter().any(|n| n == "DP-1")) {
+            let ext = device::output("external");
+            if ws == "3" && session::outputs().is_some_and(|o| o.contains(&ext)) {
                 session::sway(&["workspace", "number", &ws]); // the panel stays with whoever has it
                 return Ok(ShowResult::default());
             }
             self.handover.take_screen(); // on the panel: a leased VM gives it back
             session::sway(&["workspace", "number", &ws]);
-            session::sway(&["output", "DSI-1", "scale", "1"]);
+            session::sway(&["output", &device::panel_output(), "scale", "1"]);
         } else if conf.is_some() {
             self.handover.give(&d, None); // everything assigned to the VM (a VM's page › Hardware)
         } else {
             session::sway(&["workspace", "2"]);
-            session::sway(&["output", "DSI-1", "scale", "1"]);
+            session::sway(&["output", &device::panel_output(), "scale", "1"]);
         }
         Ok(ShowResult::default())
     }

@@ -403,7 +403,8 @@ impl State {
     fn on_commit(&mut self, s: &WlSurface) {
         if let Some(tl) = self.toplevel.as_ref().filter(|t| t.wl_surface() == s && !t.is_initial_configure_sent()) {
             // the VM's toplevel: fullscreen at the leased mode's size (no client-side title bar or shadow)
-            let size = self.kms.as_ref().map_or((1080, 2520), |k| k.size());
+            let size = self.kms.as_ref().map(|k| k.size())
+                .or_else(|| mship_core::device::panel().map(|p| (p.width, p.height))).unwrap_or((1080, 1920));
             configure(tl, size);
         }
         let buffer = with_states(s, |states| match states.cached_state.get::<SurfaceAttributes>().current().buffer.take() {
@@ -727,7 +728,7 @@ fn render_node() -> Option<PathBuf> {
 }
 
 fn run(sock: PathBuf) -> Result<(), String> {
-    let output = std::env::var("MSHIP_VM_OUTPUT").ok().filter(|o| !o.is_empty()).unwrap_or_else(|| "DSI-1".into());
+    let output = std::env::var("MSHIP_VM_OUTPUT").ok().filter(|o| !o.is_empty()).unwrap_or_else(mship_core::device::panel_output);
     let want_mode = std::env::var("MSHIP_VM_MODE").ok().and_then(|m| {
         let (w, h) = m.split_once('x')?;
         Some((w.parse().ok()?, h.parse().ok()?))

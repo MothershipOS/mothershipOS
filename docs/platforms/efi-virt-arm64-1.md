@@ -2,13 +2,13 @@
 
 Runs an arm64 Linux guest from a disk image: a desktop on the external display (Ubuntu 26.04 desktop:
 [ubuntu_26.04_desktop_VM](https://github.com/MothershipOS/ubuntu_26.04_desktop_VM)) or a phone OS on the panel
-(`"output": "DSI-1"`). The host implements it with
+(`"output": "panel"`). The host implements it with
 crosvm; the VMM is not part of the contract.
 
 - **Works:** the Ubuntu desktop boots by direct kernel boot and runs with every device below (the state of each
   slot is in its contract).
 - **Needs work:**
-  - The panel layout (`"output": "DSI-1"`) has no sound and no display power from the guest yet; no guest has been
+  - The panel layout (`"output": "panel"`) has no sound and no display power from the guest yet; no guest has been
     booted on it yet.
   - Sound is a virtio-snd device played on the external display's audio (DisplayPort), not `mship.audio` handles.
   - The vsock CID comes from `vm.json` instead of being allocated.
@@ -19,9 +19,10 @@ crosvm; the VMM is not part of the contract.
 with the disk `boot.disk`. Kernel parameters: `root=/dev/vda1 rootfstype=ext4 rootwait console=hvc0 <boot.params>` (default
 `ro quiet splash`; `boot.params` with its own `root=` replaces the first). No initrd: the guest kernel has its drivers built in.
 
-**Screen (`output`):** `"DP-1"` (default): the external display, below. `"DSI-1"`: the phone's panel: one display of
-1080x2520 at 420 dpi, shown while the VM holds the `display` item; multi-touch (`mship.touch`, "NT36672C") and a
-keyboard device with the volume and power keys (`mship.keys`), both only while lent.
+**Screen (`output`):** `"external"` (default; or a connector name such as `"DP-1"`): the external display, below.
+`"panel"` (or the panel's connector name): the phone's panel: one display at the panel's size and density (the
+`display` handle's caps), shown while the VM holds the `display` item; multi-touch (`mship.touch`, "mship-touch")
+and a keyboard device with the volume and power keys (`mship.keys`), both only while lent.
 
 **Devices the guest can rely on:**
 | Device | Detail |

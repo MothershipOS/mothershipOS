@@ -1,8 +1,8 @@
 //! CPU temperature guard: keeps the CPUs under the CPU mode's temperature limit (/etc/mothership/cpu.json "limit").
 //!
 //! Every pass (2 s): while the hottest CPU zone is above the limit, lower the clock caps by one frequency step, plus
-//! one per 5 °C over (at most 4 per pass); the big cores first, the A55s (policy0) only once the big cores are at
-//! their floor (a third up their table). Once it is 5 °C under the limit, raise them a step per pass back to the
+//! one per 5 °C over (at most 4 per pass); the big cores first, CPU 0's cluster (policy0: the efficiency cores) only
+//! once the big cores are at their floor (a third up their table). Once it is 5 °C under the limit, raise them a step per pass back to the
 //! mode's caps. Writes scaling_max_freq only; the mode itself (cpu.json) stays as set.
 
 use std::collections::BTreeMap;
@@ -14,7 +14,7 @@ use mship_host::util::{rd, rd_u64, wr};
 
 /// °C under the limit before clocks go back up
 const HYSTERESIS: f64 = 5.0;
-/// the A55 cluster: throttled last
+/// CPU 0's cluster (the efficiency cores): throttled last
 const SMALL: &str = "policy0";
 
 pub type Tables = BTreeMap<String, Vec<u64>>;

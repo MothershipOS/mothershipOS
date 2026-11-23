@@ -8,7 +8,7 @@ never emulated.
 | Tool | Where | What |
 |---|---|---|
 | `cargo xtask` | `xtask/` (PC) | `check` (clippy + tests), `host-kernel`, `initramfs`, `fit`, `gpu`, `sway`, `vhost-sound`, `dist`, `abl-dtb`; `cargo xtask help` |
-| `mship-dev` | `crates/mship-dev` (PC) | `sh`, `proxy`, `console`, `deploy-fit`, `edl`, `uart`, `backup`; `cargo run --release -p mship-dev -- --help` |
+| `mship-dev` | `crates/mship-dev` (PC) | `sh`, `proxy`, `console`, `deploy`, `edl`, `uart`, `backup`; `cargo run --release -p mship-dev -- --help` |
 | `mship-system` | `crates/mship-system` (phone, root) | `install <tar>`, `setup`, `boot-image <fit>`, `vm-install <repository \| package>`, and the system jobs its units run |
 | `mship` | `crates/mship` (phone) | mothershipd's command line: VMs, hardware handover, screen, power |
 
@@ -25,9 +25,10 @@ never emulated.
 ## Kernel, DT, initramfs (nio)
 - `cargo xtask host-kernel` builds the kernel and modules (the pinned LTS from
   `motorola_nio/kernel/sources.lock.json` + `motorola_nio/kernel/patches`, config fragment `nio-host.config`),
-  `cargo xtask initramfs` the initramfs (mship-init, busybox, early firmware), `cargo xtask fit` the FIT
-  (`motorola_nio/boot/nio-el2.its`: kernel + DTB + initramfs) in `target/boot/nio-el2.itb`.
-- `mship-dev deploy-fit [itb]` writes it to boot_b from the running phone, verifies it and reboots
+  `cargo xtask initramfs` the initramfs (mship-init, busybox, early firmware), `cargo xtask boot-image` (or `fit`)
+  the FIT (`motorola_nio/boot/nio-el2.its`: kernel + DTB + initramfs) in `target/boot/nio-el2.itb`. Other phones:
+  `MSHIP_PORT=<port>` ([ports](ports.md)).
+- `mship-dev deploy [image]` writes it to the boot partition (device.json boot.partition: the nio's boot_b) from the running phone, verifies it and reboots
   (`--no-reboot` to skip that). On the phone itself: `mship-system boot-image <fit> [--reboot]`.
 - u-boot (hyp_b) is written over EDL: `mship-dev edl --program …` (the port's
   [boot notes](https://github.com/MothershipOS/motorola_nio/blob/main/docs/boot.md)).

@@ -1,10 +1,9 @@
 [Unit]
-Description=mothershipOS host compositor (sway on DSI-1)
+Description=mothershipOS host compositor (sway on the panel)
 Requires=seatd.service
-# not after systemd-user-sessions (it waits for the network): the session is a service with seatd, not a login;
-# after the KMS device (WLR_DRM_DEVICES below) has registered (80-mship-drm-systemd.rules)
-After=seatd.service getty@tty1.service dev-dri-card1.device
-Wants=dev-dri-card1.device
+# not after systemd-user-sessions (it waits for the network): the session is a service with seatd, not a login.
+# session-setup waits for the panel's KMS device and writes its card (WLR_DRM_DEVICES) and the sway settings
+After=seatd.service getty@tty1.service
 Conflicts=getty@tty1.service
 
 [Service]
@@ -13,10 +12,14 @@ WorkingDirectory=~
 RuntimeDirectory=mship-wayland
 RuntimeDirectoryMode=0700
 Environment=XDG_RUNTIME_DIR=/run/mship-wayland
-Environment=WLR_DRM_DEVICES=/dev/dri/card1
 Environment=WLR_LIBINPUT_NO_DEVICES=1
 Environment=LIBSEAT_BACKEND=seatd
+# the boot logo fades out before sway takes the panel; the shell fades in once it is on screen (mship-system splash)
+ExecStartPre=+/usr/local/sbin/mship-system session-setup
+EnvironmentFile=-/run/mothership/sway/env
+ExecStartPre=+/usr/local/sbin/mship-system splash-out
 ExecStart=/usr/bin/sway
+ExecStartPost=+/usr/local/sbin/mship-system splash-in
 # VMs started from the shell run in this unit; the kernel OOM-killing one must not stop the whole session
 OOMPolicy=continue
 Restart=on-failure

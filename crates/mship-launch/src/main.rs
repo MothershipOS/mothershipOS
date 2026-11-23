@@ -39,19 +39,30 @@ pub fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.into())
 }
 
-/// The event device whose name contains `name`.
-pub fn evdev(name: &str) -> Option<String> {
-    let mut found: Vec<String> = std::fs::read_dir("/sys/class/input")
-        .ok()?
-        .flatten()
-        .filter_map(|e| {
-            let n = e.file_name().to_string_lossy().into_owned();
-            let dev = std::fs::read_to_string(e.path().join("device/name")).ok()?;
-            (n.starts_with("event") && dev.contains(name)).then(|| format!("/dev/input/{n}"))
-        })
-        .collect();
-    found.sort();
-    found.into_iter().next()
+/// The panel a VM's display takes (mship_core::device); a 1080x1920 one when none is found.
+pub fn panel() -> mship_core::device::Panel {
+    mship_core::device::panel().unwrap_or(mship_core::device::Panel {
+        output: "DSI-1".into(), card: "/dev/dri/card0".into(), width: 1080, height: 1920, refresh_hz: 60, dpi: 400, scale: 2.0,
+    })
+}
+
+/// The touch device's name in the guest (mship.touch): the same on every phone.
+pub const TOUCH_NAME: &str = "mship-touch";
+
+/// mship-inputd's devices, as event nodes (comma-separated): the touchscreen, the volume keys' devices, and what wakes
+/// the phone (power key, wake gesture). MSHIP_VM_TOUCH / MSHIP_VM_KEYS / MSHIP_VM_POWER override them.
+pub fn input_devices() -> (String, String, String) {
+    use mship_core::device;
+    let touch = env_or("MSHIP_VM_TOUCH", &device::touchscreen().map(|t| t.node).unwrap_or_default());
+    let keys = env_or("MSHIP_VM_KEYS", &device::nodes(&device::volume_keys()));
+    let power = env_or("MSHIP_VM_POWER", &device::nodes(&device::power_keys()));
+    (touch, keys, power)
+}
+
+/// crosvm's display and touch for the panel (`dir`: the VM's runtime directory with the input sockets).
+pub fn panel_args(dir: &str, p: &mship_core::device::Panel, hz: &str) -> (String, String) {
+    (format!("displays=[[mode=windowed[{},{}],dpi=[{dpi},{dpi}],refresh-rate={hz}]]", p.width, p.height, dpi = p.dpi),
+     format!("--input=multi-touch[path={dir}/touch.sock,width={},height={},name={TOUCH_NAME}]", p.width, p.height))
 }
 
 /// The VM's camera slot (mship.camera): mship-camera's nodes for it, in camera order (the guest sees them as V4L2
@@ -230,20 +241,26 @@ fn serve_jack_switches(vm: &Vm, jacks: &Path) -> Res<PathBuf> {
     Ok(path)
 }
 
-/// The host Venus decoder (by name: its /dev/videoN index changes between boots).
-pub fn venus_decoder() -> Option<String> {
-    video_node("qcom-venus-decoder")
+/// The host's hardware video decoder (mship.video): the V4L2 device named "*-decoder" (e.g. qcom-venus-decoder), or
+/// device.json video.decoder; by name, as its /dev/videoN index changes between boots.
+pub fn video_decoder() -> Option<String> {
+    video_node("decoder")
 }
 
-/// The host's Venus encoder (mship.video, hardware video encode).
-pub fn venus_encoder() -> Option<String> {
-    video_node("qcom-venus-encoder")
+/// The host's hardware video encoder (mship.video): "*-encoder", or device.json video.encoder.
+pub fn video_encoder() -> Option<String> {
+    video_node("encoder")
 }
 
-fn video_node(card: &str) -> Option<String> {
-    std::fs::read_dir("/sys/class/video4linux").ok()?.flatten().find_map(|v| {
+fn video_node(kind: &str) -> Option<String> {
+    let want = mship_core::device::conf()["video"][kind].as_str().map(String::from);
+    let mut nodes: Vec<_> = std::fs::read_dir("/sys/class/video4linux").ok()?.flatten().collect();
+    nodes.sort_by_key(|v| v.file_name());
+    nodes.into_iter().find_map(|v| {
         let name = std::fs::read_to_string(v.path().join("name")).ok()?;
-        (name.trim() == card).then(|| format!("/dev/{}", v.file_name().to_string_lossy()))
+        let name = name.trim();
+        let hit = match &want { Some(w) => name == w, None => name.ends_with(&format!("-{kind}")) };
+        hit.then(|| format!("/dev/{}", v.file_name().to_string_lossy()))
     })
 }
 
@@ -259,9 +276,15 @@ pub fn wait_for(path: &Path, tries: u32) -> bool {
 
 /// A log file for a helper: the previous run's kept as <name>.prev.log.
 /// crosvm's `--net` for each of the VM's network cards, in order (mship_core::vmnet: blank until a handle is attached).
+/// The VM's network cards (mship_core::vmnet), at fixed PCI addresses in the platform's card order: the guest kernel
+/// names them (eth0, eth1, ...) by PCI address, and the cards must keep their order whatever else the VM has (more
+/// consoles moved them before: Cuttlefish's mobile data card, eth0, became the internet card). 00:1c.0 up: crosvm
+/// places devices with an address first, the others after.
 pub fn net_args(vm: &Vm) -> Res<Vec<String>> {
     let net = mship_core::vmnet::load(&vm.name).ok_or_else(|| format!("{}: no network (mothershipd brings it up at start)", vm.name))?;
-    Ok(net.nics.iter().flat_map(|n| ["--net".to_string(), format!("tap-name={},mac={}", n.tap, n.mac)]).collect())
+    Ok(net.nics.iter().enumerate()
+        .flat_map(|(i, n)| ["--net".to_string(), format!("tap-name={},mac={},pci-address=00:{:02x}.0", n.tap, n.mac, 0x1c + i)])
+        .collect())
 }
 
 pub fn log_file(d: &Path, name: &str) -> Res<File> {

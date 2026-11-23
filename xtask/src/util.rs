@@ -11,9 +11,51 @@ pub fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
 
+/// The port built when `MSHIP_PORT` names none.
+pub const DEFAULT_PORT: &str = "motorola_nio";
+
+/// The phone port's repository name: `MSHIP_PORT` (e.g. `xiaomi_polaris`), else the nio.
+pub fn port_name() -> String {
+    std::env::var("MSHIP_PORT").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| DEFAULT_PORT.into())
+}
+
 /// The phone port, next to mothershipOS (its own repository): kernel, device tree, boot chain, firmware, rootfs
 pub fn port() -> PathBuf {
-    root().parent().unwrap().join("motorola_nio")
+    root().parent().unwrap().join(port_name())
+}
+
+/// The port's description (`port.json`: the names of its kernel fragment, boot image and firmware; docs/ports.md).
+pub fn port_conf() -> Result<serde_json::Value> {
+    let p = port().join("port.json");
+    let text = std::fs::read_to_string(&p).with_context(|| format!("{}: not a mothershipOS port (MSHIP_PORT={})", p.display(), port_name()))?;
+    serde_json::from_str(&text).with_context(|| p.display().to_string())
+}
+
+/// A string of port.json at a `/`-separated path.
+pub fn port_str(path: &str) -> Result<String> {
+    let c = port_conf()?;
+    c.pointer(&format!("/{path}")).and_then(|v| v.as_str()).map(String::from).with_context(|| format!("port.json: no {path}"))
+}
+
+/// A number of port.json (a JSON number, or a string like "0x8000").
+pub fn port_u64(path: &str) -> Result<u64> {
+    let c = port_conf()?;
+    let v = c.pointer(&format!("/{path}")).with_context(|| format!("port.json: no {path}"))?;
+    if let Some(n) = v.as_u64() {
+        return Ok(n);
+    }
+    let s = v.as_str().with_context(|| format!("port.json: {path} is not a number"))?;
+    let n = match s.strip_prefix("0x") {
+        Some(h) => u64::from_str_radix(h, 16),
+        None => s.parse(),
+    };
+    n.with_context(|| format!("port.json: {path} = {s:?}"))
+}
+
+/// Where the port's boot build goes: target/ for the default port (the paths the tools and docs name), target/<port>/
+/// for the others (a kernel tree each).
+pub fn port_target() -> PathBuf {
+    if port_name() == DEFAULT_PORT { target_dir() } else { target_dir().join(port_name()) }
 }
 
 

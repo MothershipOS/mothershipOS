@@ -20,6 +20,8 @@ pub mod sway;
 pub mod uevent;
 pub mod version;
 pub mod vmnet;
+pub mod backlight;
+pub mod device;
 
 /// This mothershipOS release (the repo's `VERSION` file; a test keeps them equal).
 pub const RELEASE: &str = "2026.1";

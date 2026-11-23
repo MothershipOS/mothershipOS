@@ -109,8 +109,8 @@ pub fn crosvm_cpu_args(host: &[HostCpu], cap: Option<usize>) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// the nio (SM8250): 4 A55, 3 A77, 1 A77 prime
-    fn nio() -> Vec<HostCpu> {
+    /// three clusters (e.g. SM8250): 4 A55, 3 A77, 1 A77 prime
+    fn three_clusters() -> Vec<HostCpu> {
         (0..8)
             .map(|cpu| match cpu {
                 0..=3 => HostCpu { cpu, capacity: 261, cluster: vec![0, 1, 2, 3] },
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn mirrors_every_cpu() {
-        assert_eq!(crosvm_cpu_args(&nio(), None), vec![
+        assert_eq!(crosvm_cpu_args(&three_clusters(), None), vec![
             "--cpus", "num-cores=8,clusters=[[0,1,2,3],[4,5,6],[7]]",
             "--cpu-affinity", "0=0,1,2,3:1=0,1,2,3:2=0,1,2,3:3=0,1,2,3:4=4,5,6:5=4,5,6:6=4,5,6:7=7",
             "--cpu-capacity", "0=261,1=261,2=261,3=261,4=801,5=801,6=801,7=1024",
@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn a_cap_keeps_the_fastest() {
-        assert_eq!(crosvm_cpu_args(&nio(), Some(4)), vec![
+        assert_eq!(crosvm_cpu_args(&three_clusters(), Some(4)), vec![
             "--cpus", "num-cores=4,clusters=[[0,1,2],[3]]",
             "--cpu-affinity", "0=4,5,6:1=4,5,6:2=4,5,6:3=7",
             "--cpu-capacity", "0=801,1=801,2=801,3=1024",

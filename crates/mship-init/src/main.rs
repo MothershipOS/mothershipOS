@@ -9,7 +9,7 @@
 //!    whatever the root disk has there is never used, so kernel and modules always match.
 //! 3. the RAM host: a root shell on the serial console (uart12), after a KVM report
 //!
-//! Not as PID 1 (the RAM host's diagnostics, formerly nio-diag): `mship-init kvm` (KVM API and VM creation),
+//! Not as PID 1 (the RAM host's diagnostics): `mship-init kvm` (KVM API and VM creation),
 //! `mship-init reboot [MODE]` (sync and restart; MODE, e.g. bootloader, goes to reboot-mode).
 
 use std::ffi::CString;
@@ -27,7 +27,7 @@ const NEWROOT: &str = "/newroot";
 
 fn log(msg: &str) {
     if let Ok(mut k) = fs::OpenOptions::new().write(true).open("/dev/kmsg") {
-        let _ = writeln!(k, "mothership-nio: {msg}");
+        let _ = writeln!(k, "mothership: {msg}");
     }
 }
 
@@ -120,7 +120,7 @@ fn dev_link() -> Vec<i32> {
         ("idVendor", "0x1d6b"),
         ("idProduct", "0x0104"),
         ("strings/0x409/manufacturer", "mothership"),
-        ("strings/0x409/product", "nio-el2"),
+        ("strings/0x409/product", "mothershipOS"),
         ("functions/ncm.usb0/host_addr", "ae:65:c1:c0:ad:eb"),
         ("functions/ncm.usb0/dev_addr", "12:1d:5a:79:eb:49"),
         ("configs/c.1/strings/0x409/configuration", "c"),
@@ -231,6 +231,51 @@ fn modules(release: &str) -> Result<(), String> {
     mount("none", &to_s, "", libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV, None).map_err(|e| format!("read-only {to_s}: {e}"))
 }
 
+/// The boot logo fades in: the backlight starts at 0 (the DT's default-brightness) and a child process ramps it to the
+/// saved brightness (the root's /etc/mothership/display.json, percent; 50 if none) in perceived brightness. The child
+/// opens the backlight before the root switch moves /sys away, so it outlives it; mship-system splash-out/-in
+/// (the compositor's unit) fade the logo out and the shell in.
+fn splash_fade_in() {
+    let pct = fs::read_to_string(Path::new(NEWROOT).join("etc/mothership/display.json"))
+        .ok()
+        .and_then(|s| {
+            let i = s.find("\"brightness\"")?;
+            let digits: String = s[i + 12..].chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit()).collect();
+            digits.parse::<u64>().ok()
+        })
+        .unwrap_or(50)
+        .clamp(1, 100);
+    // the panel's backlight, the first one (mship_core::device's default; no device.json in the initramfs). Wait for
+    // it (the display comes up before this, at ~6 s on the nio): at most 2 s here, the switch must not wait
+    let first = || fs::read_dir("/sys/class/backlight").ok()?.flatten().map(|e| e.path()).min();
+    let mut bl = None;
+    for _ in 0..40 {
+        bl = first().filter(|b| b.join("brightness").exists());
+        if bl.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let Some(f) = bl.as_ref().and_then(|b| fs::OpenOptions::new().write(true).open(b.join("brightness")).ok()) else {
+        return log("SPLASH no backlight yet (the shell's fade brings it up)");
+    };
+    let max: f64 = fs::read_to_string(bl.as_ref().unwrap().join("max_brightness")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(4095.0);
+    let target = max * pct as f64 / 100.0;
+    if unsafe { libc::fork() } != 0 {
+        return; // the parent switches root; the child fades
+    }
+    let (steps, ms) = (44u32, 700u64);
+    for i in 1..=steps {
+        let t = i as f64 / steps as f64;
+        let t = t * t * (3.0 - 2.0 * t);
+        // even in perceived brightness: L = (raw / max)^(1 / 2.2)
+        let v = ((target / max).powf(1.0 / 2.2) * t).powf(2.2) * max;
+        let _ = std::os::unix::fs::FileExt::write_at(&f, format!("{}", v.round() as u64).as_bytes(), 0);
+        std::thread::sleep(Duration::from_millis(ms / steps as u64));
+    }
+    unsafe { libc::_exit(0) };
+}
+
 /// Switch to mship-root unless disabled or failing; returns only if the phone stays in the RAM host.
 fn try_root(helpers: &[i32]) {
     if fs::read_to_string("/proc/cmdline").is_ok_and(|c| c.split_whitespace().any(|w| w == "mship.ram")) {
@@ -264,6 +309,7 @@ fn try_root(helpers: &[i32]) {
         Ok(()) => log(&format!("MODULES {release} (from the boot image)")),
         Err(e) => log(&format!("MODULES_FAIL {release}: {e}")),
     }
+    splash_fade_in();
     log(&format!("ROOT_SWITCH /dev/{d} attempt={}", n + 1));
     // the USB serial and the telnet port go to the new root's services
     for p in helpers {
@@ -315,7 +361,7 @@ fn ram_host() -> ! {
     let el: Vec<&str> = klog.lines().filter(|l| { let l = l.to_lowercase(); l.contains("started at el") || l.contains("hyp mode") || l.contains("kvm [") }).take(3).collect();
     let kvm: Vec<&str> = klog.lines().filter(|l| l.to_lowercase().contains("kvm")).take(5).collect();
     println!("\n==================================================================");
-    println!(" mothershipOS nio -- EL2 RAM host (serial console / uart12)");
+    println!(" mothershipOS -- RAM host");
     println!("------------------------------------------------------------------");
     println!(" CurrentEL (from kernel): {}", el.join(" | "));
     println!(" /dev/kvm: {}", if Path::new("/dev/kvm").exists() { "present" } else { "ABSENT" });
@@ -351,7 +397,7 @@ fn init() -> ! {
     ram_host()
 }
 
-// ---------------------------------------------------------------- diagnostics (formerly nio-diag)
+// ---------------------------------------------------------------- diagnostics
 
 const KVM_GET_API_VERSION: libc::c_ulong = 0xAE00;
 const KVM_CREATE_VM: libc::c_ulong = 0xAE01;

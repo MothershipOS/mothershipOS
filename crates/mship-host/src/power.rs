@@ -1,8 +1,8 @@
 //! Screen & sleep settings, the phone's screen state, battery and charging, display brightness, power off.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
+use mship_core::{backlight, device};
 use mship_core::status::{BatteryConf, BatteryStatus, Charger, PowerConf, PowerStatus};
 
 use crate::util::{Result, fail, load_json, rd, rd_u64, run, save_json, sleep_s, wr};
@@ -12,8 +12,6 @@ pub const POWER_CONF: &str = "/etc/mothership/power.json";
 pub const SCREEN_STATE: &str = "/run/mothership/screen";
 const BATTERY_CONF: &str = "/etc/mothership/battery.json";
 const DISPLAY_CONF: &str = "/etc/mothership/display.json";
-const PSY: &str = "/sys/class/power_supply";
-const BACKLIGHT: &str = "/sys/class/backlight/backlight";
 
 // ---------------------------------------------------------------- screen & sleep
 pub fn power_conf() -> PowerConf {
@@ -55,9 +53,10 @@ pub fn set_power(key: &str, value: &str, last_decision: &str) -> Result<PowerSta
 }
 
 // ---------------------------------------------------------------- battery & charging
-/// A power supply's uevent properties (POWER_SUPPLY_X=v -> x: v).
-fn psy(name: &str) -> BTreeMap<String, String> {
-    rd(Path::new(PSY).join(name).join("uevent"), "")
+/// A power supply's uevent properties (POWER_SUPPLY_X=v -> x: v); empty when there is none of that type.
+fn psy(kind: &str) -> BTreeMap<String, String> {
+    let Some(p) = device::power_supply(kind) else { return BTreeMap::new() };
+    rd(p.join("uevent"), "")
         .lines()
         .filter_map(|l| l.split_once('='))
         .map(|(k, v)| (k.trim_start_matches("POWER_SUPPLY_").to_lowercase(), v.to_string()))
@@ -69,7 +68,7 @@ pub fn battery_conf() -> BatteryConf {
 }
 
 pub fn battery_status() -> BatteryStatus {
-    battery_from(&psy("battery"), &psy("pm8150b-charger"), battery_conf())
+    battery_from(&psy("Battery"), &psy("USB"), battery_conf())
 }
 
 /// uevent properties of the battery and the charger -> the status. Pure.
@@ -105,16 +104,16 @@ pub fn battery_from(b: &BTreeMap<String, String>, u: &BTreeMap<String, String>, 
 }
 
 fn battery_apply_conf(c: &BatteryConf) -> Result<()> {
-    let b = Path::new(PSY).join("battery");
+    // the charger's driver may still be loading at boot
+    let mut b = None;
     for _ in 0..60 {
-        if b.join("charge_control_end_threshold").exists() {
+        b = device::power_supply("Battery").filter(|b| b.join("charge_control_end_threshold").exists());
+        if b.is_some() {
             break;
         }
         sleep_s(0.5);
     }
-    if !b.join("charge_control_end_threshold").exists() {
-        return fail("no battery power supply (qcom_pm8150b_charger not loaded?)");
-    }
+    let Some(b) = b else { return fail("no battery with charge control") };
     if c.end_threshold < 100 {
         wr(b.join("charge_control_end_threshold"), c.end_threshold)?; // also lowers start to end - 5 if needed
         wr(b.join("charge_control_start_threshold"), c.end_threshold.saturating_sub(5))?;
@@ -155,14 +154,12 @@ struct DisplayConf {
 }
 
 pub fn brightness() -> u32 {
-    let mx = rd_u64(Path::new(BACKLIGHT).join("max_brightness")).max(1);
-    ((rd_u64(Path::new(BACKLIGHT).join("brightness")) * 100) as f64 / mx as f64).round() as u32
+    ((backlight::get() * 100) as f64 / backlight::max() as f64).round() as u32
 }
 
 pub fn set_brightness(pct: u32, save: bool) -> Result<u32> {
-    let mx = rd(Path::new(BACKLIGHT).join("max_brightness"), "4095").parse::<u64>().unwrap_or(4095);
     let pct = pct.clamp(1, 100);
-    wr(Path::new(BACKLIGHT).join("brightness"), (mx * pct as u64 / 100).max(1))?;
+    backlight::set((backlight::max() * pct as u64 / 100).max(1)).map_err(|e| crate::util::Error(format!("backlight: {e}")))?;
     if save {
         let mut c: DisplayConf = load_json(DISPLAY_CONF);
         c.brightness = Some(pct);
@@ -174,26 +171,7 @@ pub fn set_brightness(pct: u32, save: bool) -> Result<u32> {
 /// The backlight at a fraction (0..1] of its range, at the panel's full resolution (a VM's own brightness; not
 /// saved).
 pub fn set_backlight(frac: f64) -> Result<()> {
-    let mx = rd(Path::new(BACKLIGHT).join("max_brightness"), "4095").parse::<u64>().unwrap_or(4095);
-    wr(Path::new(BACKLIGHT).join("brightness"), ((frac.clamp(0.0, 1.0) * mx as f64).round() as u64).max(1))?;
-    Ok(())
-}
-
-/// At boot: the saved brightness (the backlight appears once the panel/WLED drivers probed).
-pub fn display_apply() -> Result<u32> {
-    for _ in 0..60 {
-        if Path::new(BACKLIGHT).join("brightness").exists() {
-            break;
-        }
-        sleep_s(0.5);
-    }
-    if !Path::new(BACKLIGHT).join("brightness").exists() {
-        return fail("no backlight");
-    }
-    match load_json::<DisplayConf>(DISPLAY_CONF).brightness {
-        Some(p) => set_brightness(p, false),
-        None => Ok(brightness()),
-    }
+    backlight::set(((frac.clamp(0.0, 1.0) * backlight::max() as f64).round() as u64).max(1)).map_err(|e| crate::util::Error(format!("backlight: {e}")))
 }
 
 /// Power off or reboot now (the caller stops the VMs first).

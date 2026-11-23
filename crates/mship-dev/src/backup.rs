@@ -422,7 +422,7 @@ pub fn firmware(serial: &str, out: Option<PathBuf>, include_huge: bool) -> Resul
         unsafe { libc::gmtime_r(&t, &mut tm) };
         format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec)
     };
-    let out = out.unwrap_or_else(|| crate::repo().join("motorola_nio/backups").join(format!("nio-firmware-{stamp}")));
+    let out = out.unwrap_or_else(|| crate::port().join("backups").join(format!("firmware-{stamp}")));
     std::fs::create_dir_all(&out)?;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o700))?;
@@ -476,7 +476,7 @@ pub fn firmware(serial: &str, out: Option<PathBuf>, include_huge: bool) -> Resul
     }
     let saved: u64 = man_parts.values().filter(|v| v.get("sha256").is_some()).filter_map(|v| v["bytes"].as_u64()).sum();
     let count = man_parts.values().filter(|v| v.get("sha256").is_some()).count();
-    let manifest = serde_json::json!({"device": "nio", "serial_captured": true, "created": stamp,
+    let manifest = serde_json::json!({"device": crate::port_name(), "serial_captured": true, "created": stamp,
         "note": "Read-only firmware/boot backup. No phone partition was written.", "skipped": skip, "partitions": man_parts, "gpt": gpt});
     std::fs::write(out.join("manifest.json"), serde_json::to_string_pretty(&manifest)? + "\n")?;
     println!("\n{count} partitions, {:.2} GB -> {}", saved as f64 / 1e9, out.display());

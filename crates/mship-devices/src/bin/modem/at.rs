@@ -15,6 +15,12 @@ const OUT_MAX: usize = 1 << 20;
 
 /// Whole command units from a guest's stream: a command line up to CR, or an SMS PDU up to Ctrl-Z / ESC (after
 /// `+CMGS=` / `+CMGW=`). The rest stays in `buf`.
+/// MSHIP_MODEM_TRACE set: every guest command and every line to a guest is logged.
+fn trace() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var_os("MSHIP_MODEM_TRACE").is_some())
+}
+
 pub fn split(buf: &mut Vec<u8>, pdu: &mut bool) -> Vec<Vec<u8>> {
     let mut out = vec![];
     loop {
@@ -169,6 +175,9 @@ impl At {
 
     /// Lines to a guest; false: not connected.
     pub fn tell(&mut self, cid: u32, lines: &[String]) -> bool {
+        if trace() {
+            log(format!("cid {cid} < {lines:?}"));
+        }
         match self.guests.get_mut(&cid) {
             Some(g) => {
                 for l in lines {
@@ -201,7 +210,13 @@ impl At {
             return vec![];
         }
         g.inbuf.extend_from_slice(&b[..n]);
-        split(&mut g.inbuf, &mut g.pdu)
+        let units = split(&mut g.inbuf, &mut g.pdu);
+        if trace() {
+            for u in &units {
+                log(format!("cid {cid} > {:?}", String::from_utf8_lossy(u)));
+            }
+        }
+        units
     }
 
     /// The modem's readable port: its lines to the holder, those `keep` passes.
@@ -227,6 +242,9 @@ impl At {
         // the SMS prompt ("> ") has no line end
         if self.pbuf.trim_ascii_start().starts_with(b">") {
             out.append(&mut self.pbuf);
+        }
+        if trace() && !out.is_empty() {
+            log(format!("modem < {:?}", String::from_utf8_lossy(&out)));
         }
         if let Some(g) = self.owner.and_then(|c| self.guests.get_mut(&c)) {
             g.queue(&out);

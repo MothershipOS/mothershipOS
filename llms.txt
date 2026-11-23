@@ -20,13 +20,14 @@ phone), one per VM: ../pixelOS_16_VM, ../ubuntu_26.04_desktop_VM, and ../vmstore
 - [Architecture](docs/architecture.md): host, ports and VMs; boot; display, GPU, input, network, power
 - [Hardware handles](docs/hardware-handles.md): how hardware is lent to VMs (the broker, ownership, release semantics)
 - [Dev workflow](docs/dev-workflow.md): building with `cargo xtask`, deploying to a phone, debugging
+- [Ports](docs/ports.md): what a phone port provides (port.json), building another phone with `MSHIP_PORT`
 - [VM packages](docs/vm-packages.md): installing a VM from its repository or a prebuilt package
 
 ## Contracts (the interface between mothershipOS and VMs)
 - [Contracts index](docs/contracts/README.md)
 - [mship.display](docs/contracts/mship.display-1.md), [mship.display-power](docs/contracts/mship.display-power-1.md), [mship.touch](docs/contracts/mship.touch-1.md), [mship.keys](docs/contracts/mship.keys-1.md), [mship.gpu](docs/contracts/mship.gpu-1.md)
 - [mship.wifi](docs/contracts/mship.wifi-1.md), [mship.net-shared](docs/contracts/mship.net-shared-1.md), [mship.bt](docs/contracts/mship.bt-1.md), [mship.modem](docs/contracts/mship.modem-1.md)
-- [mship.camera](docs/contracts/mship.camera-1.md), [mship.audio](docs/contracts/mship.audio-1.md), [mship.usb](docs/contracts/mship.usb-1.md), [mship.battery](docs/contracts/mship.battery-1.md), [mship.power](docs/contracts/mship.power-1.md), [mship.fingerprint](docs/contracts/mship.fingerprint-1.md) (design only)
+- [mship.camera](docs/contracts/mship.camera-1.md), [mship.audio](docs/contracts/mship.audio-1.md), [mship.usb](docs/contracts/mship.usb-1.md), [mship.battery](docs/contracts/mship.battery-1.md), [mship.power](docs/contracts/mship.power-1.md), [mship.fingerprint](docs/contracts/mship.fingerprint-1.md)
 - [Compatibility registry](docs/compat.md): versions, releases, open gaps
 
 ## Platforms (what a VM sees)

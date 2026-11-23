@@ -1,11 +1,10 @@
 # mship.touch 1.x
 
-- **Works:** the touchscreen in PixelOS while the `display` group is attached.
+- **Works:** the touchscreen in PixelOS while the `display` group is attached; the device is `mship-touch` at the
+  panel's size on every phone (the host's touchscreen found by its capabilities, mship_core::device).
 - **Needs work:**
-  - The device is named `NT36672C` (the nio's controller): phone-specific. It must be `mship-touch`.
   - Release does not cancel active contacts (no palm cancel, no lift).
   - Contacts already down at attach are forwarded mid-gesture.
-  - Caps are hardcoded in the launcher (1080 × 2520) instead of coming from the display handle.
 - **Not implemented:** a touch device on `efi-virt-arm64`; its input is the monitor's or dock's USB devices
   (`mship.usb`).
 

@@ -102,7 +102,8 @@ fn shipped_manifests_run_on_this_release() {
     // the VMs checked out next to mothershipOS (each its own repository): every vm.json in them runs
     let parent = root().join("..");
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(&parent).unwrap().flatten().map(|e| e.path())
-        .filter(|p| p.is_dir() && !p.ends_with("mothershipOS") && !p.ends_with("motorola_nio")).collect();
+        // not mothershipOS itself, not the phone ports (a port.json at their root)
+        .filter(|p| p.is_dir() && !p.ends_with("mothershipOS") && !p.join("port.json").exists()).collect();
     while let Some(d) = dirs.pop() {
         for e in std::fs::read_dir(&d).unwrap().flatten() {
             if e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.') {

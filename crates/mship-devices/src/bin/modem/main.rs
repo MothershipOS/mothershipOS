@@ -42,7 +42,10 @@ const CONF: &str = "/etc/mothership/modem.json";
 const CTL: &str = "/run/mothership/modem.sock";
 const VMS: &str = "/var/lib/mothership/vms";
 const STATE: &str = "/var/lib/mothership/modem";
-const FIRMWARE: &str = "/lib/firmware/qcom/sdx55m";
+/// The modem's files it reads over TFTP: device.json modem.firmware (the port's), else /lib/firmware/mothership/modem
+fn firmware() -> std::path::PathBuf {
+    mship_core::device::conf()["modem"]["firmware"].as_str().unwrap_or("/lib/firmware/mothership/modem").into()
+}
 const REASONS: &[&str] = &["user", "screen", "stop", "revoked", "gone"];
 
 /// QMI services
@@ -943,7 +946,7 @@ impl Modem {
 fn serve() -> std::io::Result<()> {
     let conf: Value = std::fs::read_to_string(CONF).ok().and_then(|c| serde_json::from_str(&c).ok()).unwrap_or_default();
     let state = Path::new(STATE);
-    let mut tftp = tftp::Tftp::new(Path::new(FIRMWARE), &state.join("readwrite"))?;
+    let mut tftp = tftp::Tftp::new(&firmware(), &state.join("readwrite"))?;
     let uev = uevents()?;
     efs::sync(&state.join("efs-backup")); // dumps from before we started
     firewall();

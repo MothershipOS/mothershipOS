@@ -79,5 +79,5 @@ whose manifest has a `mship.gnss` slot, relayed by `mship-launch` to crosvm's co
 `<vm dir>/slot-gnss.sock` for the VM's whole life (`crates/mship-launch/src/slots.rs`); host clients connect to
 `/run/mothership/gnss/host.sock` (same protocol). Control socket `/run/mothership/gnss.sock` (`attach <vm>`,
 `detach <vm> [reason]`, `status`) used by mothershipd (group `location`, lent while the VM runs). PixelOS: the HAL
-`android.hardware.gnss-service.mship` (pixelOS_16_VM `device/mothership/nio_vm/gnss`). Test client for the
+`android.hardware.gnss-service.mship` (pixelOS_17_VM `device/mothership/mothership_vm/gnss`). Test client for the
 framework's GNSS status and NMEA listeners: `motorola_nio/archive/prototypes/modem/GpsTest.java`.

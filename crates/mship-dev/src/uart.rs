@@ -1,8 +1,9 @@
-//! `uart [device]`: the nio debug UART (uart12 @ 0xa90000, 115200 8N1) and the phone's USB mode, in the terminal.
+//! `uart [device]`: the phone's debug UART (115200 8N1, wired as the port's tools/uart says) and its USB mode, in the
+//! terminal.
 //!
 //! - A feeder owns the serial port only while nothing else does: it opens it without TIOCEXCL and steps aside the
 //!   moment another process opens the device (a `cat`, a capture), then takes it again when it is free. It writes
-//!   each line, with a host timestamp, to the shared log (motorola_nio/tools/uart/live.log): the single reader of the
+//!   each line, with a host timestamp, to the shared log (the port's tools/uart/live.log): the single reader of the
 //!   port, and anything (mship-dev sh, captures) can append to the log too.
 //! - The display tails that log, highlighting boot and fault markers, with a status line: the phone's USB mode
 //!   (EDL / fastboot / adb / off, every 500 ms) and the feeder's state.
@@ -228,7 +229,7 @@ pub fn main(device: Option<String>) -> Result<i32> {
             let status = format!("USB: {} | UART {} | probe: {}", phone.as_deref().unwrap_or("phone not present (off / enumerating)"), if ft { "✓" } else { "✗" }, s.state.lock().unwrap());
             if status != last_status {
                 // the status in the terminal title, and as a line when it changes
-                print!("\x1b]0;nio probe: {status}\x07");
+                print!("\x1b]0;mship-dev uart: {status}\x07");
                 println!("\x1b[33m[monitor] {status}\x1b[0m");
                 last_status = status;
             }

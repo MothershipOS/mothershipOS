@@ -7,7 +7,10 @@ use mship_core::status::{WifiNetwork, WifiStatus};
 
 use crate::util::{Result, fail, load_value, run, save_json};
 
-pub const IFACE: &str = "wlp1s0";
+/// The phone's Wi-Fi station (mship_core::device::wifi_iface; "wlan0" when none is there yet).
+pub fn iface() -> String {
+    mship_core::device::wifi_iface().unwrap_or_else(|| "wlan0".into())
+}
 const OWNERS: &str = "/run/mothership/owners.json";
 
 /// Split one `nmcli -t` line (':' separated, '\:' and '\\' escaped).
@@ -68,7 +71,7 @@ pub fn owner_set(dev: &str, owner: &str) -> Result<OwnerChange> {
     let mut o = owners();
     let previous = o.insert(dev.into(), owner.into()).unwrap_or_else(|| "host".into());
     // older builds released the interface for a VM: make sure mothershipOS manages it
-    run("nmcli", &["device", "set", IFACE, "managed", "yes"]);
+    run("nmcli", &["device", "set", &iface(), "managed", "yes"]);
     save_json(OWNERS, &o)?;
     Ok(OwnerChange { device: dev.into(), owner: owner.into(), owner_name: owner_name(owner), previous })
 }
@@ -93,24 +96,24 @@ pub fn status() -> WifiStatus {
         radio: run("nmcli", &["-t", "radio", "wifi"]).stdout.trim() == "enabled",
         owner: o["wifi"].clone(),
         owner_name: owner_name(&o["wifi"]),
-        present: Path::new("/sys/class/net").join(IFACE).exists(),
+        present: Path::new("/sys/class/net").join(iface()).exists(),
         state: "unavailable".into(),
         ..Default::default()
     };
     for line in run("nmcli", &["-t", "-f", "DEVICE,STATE,CONNECTION", "device"]).stdout.lines() {
         let f = nm_split(line);
-        if f.first().map(String::as_str) == Some(IFACE) && f.len() >= 3 {
+        if f.first().map(String::as_str) == Some(iface().as_str()) && f.len() >= 3 {
             st.state = f[1].clone();
             st.ssid = (!f[2].is_empty()).then(|| f[2].clone());
         }
     }
     if st.state == "connected" {
-        st.ip = run("nmcli", &["-t", "-f", "IP4.ADDRESS", "device", "show", IFACE])
+        st.ip = run("nmcli", &["-t", "-f", "IP4.ADDRESS", "device", "show", &iface()])
             .stdout
             .lines()
             .next()
             .and_then(|l| nm_split(l).get(1).map(|a| a.split('/').next().unwrap_or_default().to_string()));
-        let link = run("iw", &["dev", IFACE, "link"]).stdout;
+        let link = run("iw", &["dev", &iface(), "link"]).stdout;
         st.signal = after(&link, "signal: ").and_then(|s| s.parse().ok());
         st.freq = after(&link, "freq: ").and_then(|s| s.parse().ok());
     }
@@ -134,7 +137,7 @@ fn band(freq: &str) -> &'static str {
 /// Visible networks, one per SSID (the connected one, else the strongest), connected first, then by signal.
 pub fn scan() -> Result<Vec<WifiNetwork>> {
     require_host()?;
-    let out = run("nmcli", &["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY,FREQ", "device", "wifi", "list", "ifname", IFACE,
+    let out = run("nmcli", &["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY,FREQ", "device", "wifi", "list", "ifname", &iface(),
                               "--rescan", "yes"]).stdout;
     Ok(best_networks(&out, &status().saved))
 }
@@ -175,7 +178,8 @@ pub fn connect(ssid: &str, password: &str) -> Result<WifiStatus> {
         if saved {
             run("nmcli", &["connection", "delete", "id", ssid]);
         }
-        let mut args = vec!["-w", "30", "device", "wifi", "connect", ssid, "ifname", IFACE];
+        let ifc = iface();
+        let mut args = vec!["-w", "30", "device", "wifi", "connect", ssid, "ifname", &ifc];
         if !password.is_empty() {
             args.extend(["password", password]);
         }
@@ -191,7 +195,7 @@ pub fn connect(ssid: &str, password: &str) -> Result<WifiStatus> {
 
 pub fn disconnect() -> Result<WifiStatus> {
     require_host()?;
-    run("nmcli", &["device", "disconnect", IFACE]);
+    run("nmcli", &["device", "disconnect", &iface()]);
     Ok(status())
 }
 

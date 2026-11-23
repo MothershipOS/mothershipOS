@@ -444,7 +444,6 @@ pub fn ssh_page(s: &S) -> adw::NavigationPage {
 }
 
 // ------------------------------------------------------------------ CPU
-const CLUSTERS: &[(&str, &str)] = &[("policy0", "Efficiency cores (A55 ×4)"), ("policy4", "Performance cores (A77 ×3)"), ("policy7", "Prime core (A77)")];
 
 fn profile_info(p: &str) -> &'static str {
     match p {
@@ -456,7 +455,7 @@ fn profile_info(p: &str) -> &'static str {
 }
 
 struct Cluster {
-    policy: &'static str,
+    policy: String,
     cur: adw::ActionRow,
     gov: adw::ComboRow,
     max: adw::ComboRow,
@@ -527,10 +526,11 @@ pub fn cpu_page(s: &S) -> adw::NavigationPage {
     g.add(&info);
     let mut groups = vec![g];
     let mut clusters = vec![];
-    for (p, name) in CLUSTERS {
-        let cg = group(name, "");
+    let found = mship_core::device::clusters();
+    for (i, cl) in found.iter().enumerate() {
+        let cg = group(&mship_core::device::cluster_label(&found, i), "");
         let c = Cluster {
-            policy: p,
+            policy: cl.policy.clone(),
             cur: row("Current frequency", "…", None, false),
             gov: adw::ComboRow::builder().title("Governor").build(),
             max: adw::ComboRow::builder().title("Maximum frequency").build(),
@@ -567,7 +567,7 @@ pub fn cpu_page(s: &S) -> adw::NavigationPage {
             }
             let (Some(gov), Some(max)) = (govs.get(c.gov.selected() as usize), freqs.get(c.max.selected() as usize)) else { return };
             let xx2 = xx.clone();
-            s.ask_t(Op::CpuSet { policy: c.policy.into(), governor: gov.clone(), max_khz: *max }, move |st: CpuStatus| cpu_show(&xx2, &st));
+            s.ask_t(Op::CpuSet { policy: c.policy.clone(), governor: gov.clone(), max_khz: *max }, move |st: CpuStatus| cpu_show(&xx2, &st));
         }));
         let f2 = f.clone();
         x.clusters[i].gov.connect_selected_notify(move |_| f());
@@ -860,7 +860,7 @@ pub fn battery_page(s: &S) -> adw::NavigationPage {
     let gc = group("Charger", "");
     gc.add(&x.chg);
     gc.add(&x.rate);
-    let gs = group("Charging", "The charge current follows the battery temperature (stock Motorola zones); charging stops below 0 °C and above 60 °C.");
+    let gs = group("Charging", "The charger follows the battery temperature (its own safe limits).");
     gs.add(&x.limit);
     gs.add(&x.on);
     let gi = group("Battery", "");
@@ -1065,7 +1065,7 @@ pub fn display_page(s: &S) -> adw::NavigationPage {
     scale.set_selected(1);
     let me = Rc::downgrade(s);
     scale.connect_selected_notify(move |w| {
-        let r = mship_core::sway::Sway::session().and_then(|mut sw| sw.command(&format!("output DSI-1 scale {}", SCALES[w.selected() as usize])));
+        let r = mship_core::sway::Sway::session().and_then(|mut sw| sw.command(&format!("output {} scale {}", mship_core::device::panel_output(), SCALES[w.selected() as usize])));
         if let (Err(e), Some(s)) = (r, me.upgrade()) {
             s.toast(&e.to_string());
         }

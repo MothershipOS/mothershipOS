@@ -12,23 +12,44 @@ use crate::util::{Result, fail, load_value, rd, rd_u64, run, save_json, sleep_s,
 pub const CONF: &str = "/etc/mothership/cpu.json";
 pub const CPUFREQ: &str = "/sys/devices/system/cpu/cpufreq";
 
-/// A mode: governor, per-cluster caps (kHz; policy0 = A55 ×4, policy4 = A77 ×3, policy7 = prime A77), and the
-/// temperature (°C) above which the CPU guard steps the caps down (`None`: only the kernel's 90 °C trip).
+/// A mode: governor, how high each cluster may clock, and the temperature (°C) above which the CPU guard steps the
+/// caps down (`None`: only the kernel's thermal trips).
 pub struct Profile {
     pub name: &'static str,
     pub governor: &'static str,
     pub limit: Option<f64>,
-    pub max: &'static [(&'static str, u64)],
+    pub caps: Caps,
+}
+
+/// A mode's clock caps, from each cluster's own frequency table (mship_core::device::clusters).
+#[derive(Clone, Copy)]
+pub enum Caps {
+    /// every cluster at most half the fastest cluster's top clock (~1.5 GHz on current phones)
+    HalfFastest,
+    /// the fastest cluster at most 92 % of its top clock (its last boost steps off), the others at their top
+    BoostOff,
+    /// every cluster at its top clock
+    Top,
 }
 
 pub const PROFILES: &[Profile] = &[
-    Profile { name: "cool", governor: "conservative", limit: Some(70.0),
-              max: &[("policy0", 1516800), ("policy4", 1478400), ("policy7", 1516800)] },
-    Profile { name: "balanced", governor: "schedutil", limit: Some(80.0),
-              max: &[("policy0", 1804800), ("policy4", 2419200), ("policy7", 2841600)] },
-    Profile { name: "performance", governor: "performance", limit: None,
-              max: &[("policy0", 1804800), ("policy4", 2419200), ("policy7", 3091200)] },
+    Profile { name: "cool", governor: "conservative", limit: Some(70.0), caps: Caps::HalfFastest },
+    Profile { name: "balanced", governor: "schedutil", limit: Some(80.0), caps: Caps::BoostOff },
+    Profile { name: "performance", governor: "performance", limit: None, caps: Caps::Top },
 ];
+
+/// The caps {policy: kHz} of a mode on these clusters (slowest first).
+pub fn caps(caps: Caps, clusters: &[mship_core::device::Cluster]) -> BTreeMap<String, u64> {
+    let fastest = clusters.last().map_or(0, |c| c.max());
+    clusters.iter().enumerate().map(|(i, c)| {
+        let v = match caps {
+            Caps::HalfFastest => c.at_most(fastest / 2),
+            Caps::BoostOff if i + 1 == clusters.len() && clusters.len() > 1 => c.at_most(c.max() * 92 / 100),
+            _ => c.max(),
+        };
+        (c.policy.clone(), v)
+    }).collect()
+}
 /// names before 2026-10-21
 const OLD_PROFILES: &[(&str, &str)] = &[("powersave", "cool")];
 /// the conservative governor for Cool: ramp up only under heavy load, in small steps, and drop back early
@@ -149,7 +170,7 @@ pub fn set_profile(name: &str, guard: Option<&GuardState>) -> Result<CpuStatus> 
     let c = CpuConf {
         profile: Some(name.into()),
         governor: policies().into_iter().map(|p| (p, pr.governor.to_string())).collect(),
-        max: pr.max.iter().map(|(p, m)| (p.to_string(), *m)).collect(),
+        max: caps(pr.caps, &mship_core::device::clusters()),
         limit: pr.limit,
         has_limit: true,
     };
@@ -191,4 +212,24 @@ pub fn apply_saved() -> Result<CpuStatus> {
     }
     apply_conf(&c);
     Ok(status(None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mship_core::device::Cluster;
+
+    #[test]
+    fn modes_on_the_nio_clusters() {
+        let c = |p: &str, n: u32, f: &[u64]| Cluster { policy: p.into(), cpus: (0..n).collect(), core: "x".into(), freqs: f.to_vec() };
+        let nio = [
+            c("policy0", 4, &[300000, 1420800, 1516800, 1612800, 1804800]),
+            c("policy4", 3, &[710400, 1382400, 1478400, 1574400, 2419200]),
+            c("policy7", 1, &[844800, 1401600, 1516800, 1632000, 2745600, 2841600, 3091200]),
+        ];
+        let m = |caps| super::caps(caps, &nio).into_values().collect::<Vec<_>>();
+        assert_eq!(m(Caps::HalfFastest), [1516800, 1478400, 1516800]);
+        assert_eq!(m(Caps::BoostOff), [1804800, 2419200, 2841600]);
+        assert_eq!(m(Caps::Top), [1804800, 2419200, 3091200]);
+    }
 }

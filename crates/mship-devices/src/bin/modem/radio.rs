@@ -147,7 +147,19 @@ impl Radio {
                 }));
             }
             "+CGQREQ=1" | "+CGQMIN=1" | "+CGEREP=1,0" => return ok([]),
+            // the setup of goldfish's radio HAL (Cuttlefish's from Android 17), acknowledged as the simulator does
+            // ("default supported"): presentation settings, and the character set of its strings; the modem keeps
+            // its own (HEX would change how its answers read)
+            // and the notifications it switches on, SMS in PDU mode (the modem's default; it refuses +CCWA=1 and +CMGF=0
+            // while it searches, and one refusal ends the HAL's setup)
+            "+CMOD=0" | "+CMUT=0" | "+CSSN=0,1" | "+COLP=0" | "+CSCS=\"HEX\"" | "+CCWA=1" | "+CUSD=1" | "+CMGF=0" => return ok([]),
             _ => {}
+        }
+        // radio off: only the radio (4), never minimum functionality (0), which also powers the SIM down; this
+        // firmware's SIM init does not survive that (the card is gone until the modem restarts). Android's RIL
+        // starts with AT+CFUN=0.
+        if cmd == "+CFUN=0" {
+            return Route::Modem(b"AT+CFUN=4\r".to_vec());
         }
         if let Some(n) = cmd.strip_prefix("+CREG=") {
             // the RIL's screen state: 1 while the screen is off, 2 when it is on again. On again: the current signal
@@ -305,6 +317,10 @@ pub fn empty_slot(unit: &[u8]) -> Vec<String> {
     };
     if let Some(l) = line {
         return vec![l, "OK".into()];
+    }
+    // the notifications goldfish's radio HAL switches on at setup (it gives up on anything but OK): no SIM needed
+    if cmd == "+CUSD=1" || cmd == "+CCWA=1" {
+        return vec!["OK".into()];
     }
     if NO_SIM.iter().any(|p| cmd.starts_with(p)) {
         return vec!["+CME ERROR: 10".into()]; // SIM not inserted
@@ -489,6 +505,16 @@ mod tests {
         let q = |c: &str, r: &mut Radio| reply(r.command(c.as_bytes(), &net, &ids, &none));
         assert_eq!(q("AT+CSQ", &mut r)[0], "+CSQ: 2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,25,98,12,130,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647");
         assert_eq!(q("AT+CREG=2", &mut r), ["OK"]);
+        assert_eq!(r.command(b"AT+CFUN=0\r", &net, &ids, &none), Route::Modem(b"AT+CFUN=4\r".to_vec()));
+        for c in ["AT+CMOD=0", "AT+CMUT=0", "AT+CSSN=0,1", "AT+COLP=0", "AT+CSCS=\"HEX\"", "AT+CCWA=1", "AT+CUSD=1", "AT+CMGF=0"] {
+            assert_eq!(q(c, &mut r), ["OK"], "{c}");
+        }
+        // goldfish's radio HAL setup (Cuttlefish from Android 17): every answer must be OK, also with no modem lent
+        for c in ["ATE0Q0V1", "AT+CMEE=1", "AT+CREG=2", "AT+CGREG=2", "AT+CEREG=2", "AT+CCWA=1", "AT+CMOD=0", "AT+CMUT=0",
+                  "AT+CSSN=0,1", "AT+COLP=0", "AT+CSCS=\"HEX\"", "AT+CUSD=1", "AT+CGEREP=1,0", "AT+CMGF=0"] {
+            assert_eq!(empty_slot(c.as_bytes()).last().map(String::as_str), Some("OK"), "{c}");
+        }
+        assert_eq!(empty_slot(b"AT+CUSD=1,\"*123#\""), ["+CME ERROR: 10"]);
         assert_eq!(q("AT+CREG?", &mut r)[0], "+CREG: 2,1,\"2a3b\",\"1234567\",7");
         assert_eq!(q("AT+CGREG?", &mut r)[0], "+CGREG: 0,1,\"2a3b\",\"1234567\",7"); // detailed by +CREG's mode
         assert_eq!(q("AT+CTEC?", &mut r)[0], "+CTEC: 5,63");

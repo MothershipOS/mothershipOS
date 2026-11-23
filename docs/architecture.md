@@ -16,7 +16,7 @@ differs.
 - **Needs work:** the items listed in each [contract](contracts/README.md) and [platform](compat.md#platforms) file;
   release 2026.1 waits for them ([compat.md](compat.md)). CDSP at EL2 is untested.
 - **Not implemented:** broker-allocated vsock CIDs and sockets (they come from `vm.json` and the launcher); per-VM
-  resource sliders beyond the CPU/RAM caps; call audio; fingerprint for VMs.
+  resource sliders beyond the CPU/RAM caps; call audio.
 
 ## Boot chain (nio)
 `PBL → XBL → TZ → [hyp partition = u-boot, EL2] → Linux 6.18 at EL2 (KVM VHE)`.

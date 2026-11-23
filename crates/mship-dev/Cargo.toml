@@ -1,6 +1,6 @@
 [package]
 name = "mship-dev"
-description = "mothershipOS developer tools for the nio (on the PC): dev link shell, proxy, console, FIT deploy, EDL, UART monitor, NAS backups"
+description = "mothershipOS developer tools (on the PC, for the port MSHIP_PORT names): dev link shell, proxy, console, FIT deploy, EDL, UART monitor, NAS backups"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

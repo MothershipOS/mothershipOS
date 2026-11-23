@@ -1,9 +1,9 @@
-//! The way home: holding the assist key (gpio-keys KEY_SEARCH) for 3 s switches the panel between mothershipOS and
+//! The way home: holding the home key (device.json home_key, default KEY_SEARCH: the nio's assist key) for 3 s switches the panel between mothershipOS and
 //! the VM: a VM shown -> its screen hardware back to mothershipOS; mothershipOS shown -> lent to the running VM
 //! (on the terminals' workspace: back to the shell first). A short press does nothing.
 //!
-//! The key is read here, not grabbed (sway leaves it unbound; grabbing gpio-keys would also take volume up from
-//! the VMs' input bridges), whoever has the screen.
+//! The key is read here, not grabbed (sway leaves it unbound; grabbing its device would also take the volume keys
+//! on it from the VMs' input bridges), whoever has the screen.
 
 use std::fs::File;
 use std::io::Read;
@@ -14,18 +14,12 @@ use std::time::{Duration, Instant};
 use crate::handover::Handover;
 use crate::session;
 
-const DEVICE: &str = "gpio-keys";
-const KEY_SEARCH: u16 = 217;
 const EV_KEY: u16 = 1;
 const HOLD: Duration = Duration::from_secs(3);
 
-/// The event node of the input device named `name`.
-fn evdev(name: &str) -> Option<String> {
-    std::fs::read_dir("/sys/class/input").ok()?.flatten().find_map(|e| {
-        let n = e.file_name().to_string_lossy().into_owned();
-        (n.starts_with("event") && std::fs::read_to_string(e.path().join("device/name")).is_ok_and(|s| s.trim() == name))
-            .then(|| format!("/dev/input/{n}"))
-    })
+/// The event node of the device with the home key (none on phones without such a key: no way home by key).
+fn evdev(key: u16) -> Option<String> {
+    mship_core::device::inputs().into_iter().find(|i| i.is_keys() && i.has_key(key)).map(|i| i.node)
 }
 
 fn home(handover: &Handover) {
@@ -43,7 +37,7 @@ fn readable(f: &File, ms: i32) -> bool {
 }
 
 /// One open of the device: until it goes away (its driver rebound).
-fn watch(path: &str, handover: &Handover) {
+fn watch(path: &str, key: u16, handover: &Handover) {
     let Ok(mut f) = File::open(path) else { return };
     let mut down: Option<Instant> = None;
     let mut fired = false;
@@ -56,7 +50,7 @@ fn watch(path: &str, handover: &Handover) {
         if !readable(&f, wait) {
             if down.is_some() && !fired {
                 fired = true;
-                println!("assist key held {} s: home", HOLD.as_secs());
+                println!("home key held {} s: home", HOLD.as_secs());
                 home(handover);
             }
             continue;
@@ -66,7 +60,7 @@ fn watch(path: &str, handover: &Handover) {
         }
         let (ty, code) = (u16::from_ne_bytes([ev[16], ev[17]]), u16::from_ne_bytes([ev[18], ev[19]]));
         let value = i32::from_ne_bytes([ev[20], ev[21], ev[22], ev[23]]);
-        if ty == EV_KEY && code == KEY_SEARCH {
+        if ty == EV_KEY && code == key {
             match value {
                 1 => {
                     down = Some(Instant::now());
@@ -82,12 +76,18 @@ fn watch(path: &str, handover: &Handover) {
 pub fn start(handover: Arc<Handover>) {
     std::thread::Builder::new()
         .name("homekey".into())
-        .spawn(move || loop {
-            match evdev(DEVICE) {
-                Some(p) => watch(&p, &handover),
-                None => {}
+        .spawn(move || {
+            let key = mship_core::device::home_key();
+            if key == 0 {
+                println!("no home key (device.json home_key 0)");
+                return;
             }
-            std::thread::sleep(Duration::from_secs(2));
+            loop {
+                if let Some(p) = evdev(key) {
+                    watch(&p, key, &handover);
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
         })
         .unwrap();
 }

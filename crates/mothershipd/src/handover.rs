@@ -7,11 +7,11 @@
 //! every VM gets (`every_vm`) need no handover.
 //!
 //! mothershipd lends the session's groups itself: display = panel + touchscreen + power key. VMs with
-//! "display_mode": "lease" (crosvm + mship-vm-display) get the panel itself: sway leases the DSI connector to the VM's
-//! presenter (`swaymsg lease_output DSI-1 on`) and gets it back on take. Other VMs: their window fullscreen at scale
-//! 1. Either way the host idle timeout is off while a VM has the display, and touch goes to the VM (its input bridge,
-//! `<vm dir>/input.ctl`). buttons = volume keys. internet = shared internet (mship-net).
-//! display-ext = the USB-C external display (DP-1), leased to the VM's presenter; sway itself never uses it.
+//! "display_mode": "lease" (crosvm + mship-vm-display) get the panel itself: sway leases the panel's connector to the
+//! VM's presenter (`swaymsg lease_output <connector> on`) and gets it back on take. Other VMs: their window fullscreen
+//! at scale one. Either way the host idle timeout is off while a VM has the display, and touch goes to the VM (its
+//! input bridge, `<vm dir>/input.ctl`). The buttons group is the volume keys, internet the shared internet
+//! (mship-net), display-ext the USB-C external display, leased to the VM's presenter (sway itself never uses it).
 
 use std::collections::BTreeMap;
 use std::os::unix::net::UnixDatagram;
@@ -27,10 +27,19 @@ use mship_host::vm;
 use crate::handles::Registry;
 use crate::session;
 
-const OUT: &str = "DSI-1";
-const SESSION_SCALE: &str = "2";
+/// the panel's connector and the session's scale on it (mship_core::device)
+fn out() -> String {
+    mship_core::device::panel_output()
+}
+
+fn session_scale() -> String {
+    mship_core::device::panel().map_or(2.0, |p| p.scale).to_string()
+}
+
 /// display-ext: leased to a VM, never sway's
-const EXT_OUT: &str = "DP-1";
+fn ext_out() -> String {
+    mship_core::device::output("external")
+}
 const ASSOC: &str = "/var/lib/mothership/config/hardware.json";
 /// a repeated toggle (key bounce, re-announced key state) is ignored
 const DEBOUNCE: Duration = Duration::from_millis(1500);
@@ -197,10 +206,10 @@ impl Handover {
     fn show_vm(d: &str) {
         crate::screen::panel(true);
         if leased(d) {
-            session::sway(&["lease_output", OUT, "on"]); // the VM's presenter takes the panel itself
+            session::sway(&["lease_output", &out(), "on"]); // the VM's presenter takes the panel itself
         } else {
             session::sway(&["workspace", "number", "2"]);
-            session::sway(&["output", OUT, "scale", "1"]);
+            session::sway(&["output", &out(), "scale", "1"]);
             session::sway(&["[workspace=\"^2$\"]", "fullscreen", "enable"]);
         }
         idle(false); // the VM is in charge of its screen; the host would blank it under a grabbed touchscreen
@@ -208,15 +217,15 @@ impl Handover {
 
     fn show_host(prev: Option<&str>) {
         if prev.is_some_and(leased) {
-            session::sway(&["lease_output", OUT, "off"]); // revoke: the panel comes back to sway as a new output
+            session::sway(&["lease_output", &out(), "off"]); // revoke: the panel comes back to sway as a new output
             for _ in 0..30 {
-                if session::outputs().is_some_and(|o| o.iter().any(|n| n == OUT)) {
+                if session::outputs().is_some_and(|o| o.iter().any(|n| *n == out())) {
                     break; // sway has it again: configure it
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
-        session::sway(&["output", OUT, "scale", SESSION_SCALE]);
+        session::sway(&["output", &out(), "scale", &session_scale()]);
         session::sway(&["workspace", "number", "1"]);
         idle(true);
     }
@@ -229,7 +238,7 @@ impl Handover {
             let holder = holder(i, item);
             match *item {
                 "display-ext" => {
-                    session::sway(&["lease_output", EXT_OUT, "off"]); // revokes only this output's lease
+                    session::sway(&["lease_output", &ext_out(), "off"]); // revokes only this output's lease
                 }
                 g => {
                     for (sock, arg) in self.reg.controls(g) {
@@ -271,9 +280,9 @@ impl Handover {
             }
             if item == "display-ext" {
                 if holder != "host" && holder != d {
-                    session::sway(&["lease_output", EXT_OUT, "off"]);
+                    session::sway(&["lease_output", &ext_out(), "off"]);
                 }
-                session::sway(&["lease_output", EXT_OUT, "on"]); // the VM's presenter (DP-1) takes it
+                session::sway(&["lease_output", &ext_out(), "on"]); // the VM's presenter takes it
                 i.st.insert(item.into(), d.clone());
                 continue;
             }

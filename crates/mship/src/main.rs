@@ -164,7 +164,7 @@ fn run(cmd: Cmd) -> Result<Value, String> {
                 return Ok(v);
             }
             let list: mship_core::api::HandleList = serde_json::from_value(v).map_err(|e| e.to_string())?;
-            println!("{:<22} {:<14} {:<13} {:<20} {}", "HANDLE", "GROUP", "SERVICE", "CONTRACT", "SHARING · DIRECTION");
+            println!("{:<22} {:<14} {:<13} {:<20} SHARING · DIRECTION", "HANDLE", "GROUP", "SERVICE", "CONTRACT");
             for i in &list.handles {
                 let h = &i.handle;
                 println!("{:<22} {:<14} {:<13} {:<20} {}{}", h.id, h.group.as_deref().unwrap_or("-"), i.service,

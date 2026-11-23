@@ -44,9 +44,10 @@ pub fn meminfo() -> HashMap<String, u64> {
 /// (rx, tx) bytes summed over the phone's uplinks (VM traffic is NATed out through them)
 fn net_bytes() -> (u64, u64) {
     let mut t = (0, 0);
+    let wifi = mship_core::device::wifi_iface();
     for l in std::fs::read_to_string("/proc/net/dev").unwrap_or_default().lines() {
         let Some((name, rest)) = l.split_once(':') else { continue };
-        if ["wlp1s0", "usb0"].contains(&name.trim()) {
+        if Some(name.trim()) == wifi.as_deref() || name.trim() == "usb0" {
             let f: Vec<u64> = rest.split_whitespace().filter_map(|x| x.parse().ok()).collect();
             t.0 += f.first().copied().unwrap_or(0);
             t.1 += f.get(8).copied().unwrap_or(0);
@@ -106,7 +107,15 @@ fn rd_i64(path: &str) -> i64 {
     std::fs::read_to_string(path).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
 }
 
-const CORES: &[(usize, usize, &str)] = &[(0, 4, "A55"), (4, 7, "A77"), (7, 8, "prime")];
+/// The CPU clusters as (cpus, short name): the cores' names, the fastest single core of three or more clusters "prime".
+fn clusters() -> Vec<(Vec<u32>, String)> {
+    let c = mship_core::device::clusters();
+    let n = c.len();
+    c.into_iter().enumerate().map(|(i, c)| {
+        let prime = n >= 3 && i == n - 1 && c.cpus.len() <= 2;
+        (c.cpus, if prime { "prime".into() } else { c.core })
+    }).collect()
+}
 
 struct Sample {
     cpu: Vec<(u64, u64)>,
@@ -122,15 +131,16 @@ pub fn resources_page(s: &S) -> adw::NavigationPage {
     let total_mb = meminfo().get("MemTotal").copied().unwrap_or(1) as f64 / 1024.0;
     let m_cpu = Metric::new("CPU", (0.36, 0.6, 1.0), Some(100.0));
     let m_mem = Metric::new("Memory", (0.3, 0.8, 0.45), Some(total_mb));
-    let m_gpu = Metric::new("GPU (Adreno 650)", (0.75, 0.5, 1.0), Some(100.0));
+    let m_gpu = Metric::new(&format!("GPU ({})", mship_core::device::gpu_name()), (0.75, 0.5, 1.0), Some(100.0));
     let m_pwr = Metric::new("Battery power", (1.0, 0.8, 0.25), None);
     let m_net = Metric::new("Network (Wi-Fi + USB)", (1.0, 0.55, 0.25), None);
     let m_dsk = Metric::new("Storage", (0.3, 0.8, 0.8), None);
     // per-core load: a column (bar + percentage) per CPU, grouped by cluster
     let cores = gtk::Box::builder().spacing(6).margin_start(12).margin_end(12).margin_top(10).margin_bottom(10).homogeneous(true).build();
     let mut bars = vec![];
-    for (first, last, name) in CORES {
-        for i in *first..*last {
+    let clusters = clusters();
+    for (cpus, name) in &clusters {
+        for (k, _) in cpus.iter().enumerate() {
             let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).build();
             let lb = gtk::LevelBar::builder().orientation(gtk::Orientation::Vertical).inverted(true).min_value(0.0).max_value(100.0).height_request(56).halign(gtk::Align::Center).build();
             for o in ["low", "high", "full"] {
@@ -139,7 +149,7 @@ pub fn resources_page(s: &S) -> adw::NavigationPage {
             let pct = gtk::Label::builder().label("").css_classes(["caption"]).build();
             col.append(&lb);
             col.append(&pct);
-            col.append(&gtk::Label::builder().label(if i == *first { *name } else { "" }).css_classes(["caption", "dim"]).build());
+            col.append(&gtk::Label::builder().label(if k == 0 { name.as_str() } else { "" }).css_classes(["caption", "dim"]).build());
             cores.append(&col);
             bars.push((lb, pct));
         }
@@ -184,7 +194,7 @@ pub fn resources_page(s: &S) -> adw::NavigationPage {
             let Some(prev) = prev else { return };
             let dt = (r.t - prev.t).max(1e-3);
             let gpu = (100.0 * (r.gpu_ns.saturating_sub(prev.gpu_ns)) as f64 / (dt * 1e9)).min(100.0);
-            let freq = rd_i64("/sys/class/devfreq/3d00000.gpu/cur_freq") as f64 / 1e6;
+            let freq = mship_core::device::gpu_devfreq().map_or(0, |g| rd_i64(&g.join("cur_freq").to_string_lossy())) as f64 / 1e6;
             m_gpu.set(&format!("{gpu:.0} %"), gpu, Some(&format!("{freq:.0} MHz")));
         })
     };
@@ -209,7 +219,7 @@ pub fn resources_page(s: &S) -> adw::NavigationPage {
             let dt = now.duration_since(stb.t).as_secs_f64().max(1e-3);
             let (cpu, net, dsk, procs) = (cpu_times(), net_bytes(), disk_bytes(), proc_ticks());
             let pc: Vec<f64> = cpu.iter().zip(&stb.cpu).map(|(c, p)| 100.0 * c.0.saturating_sub(p.0) as f64 / (c.1.saturating_sub(p.1)).max(1) as f64).collect();
-            let clocks: Vec<String> = CORES.iter().map(|(first, _, name)| format!("{name} {}", mhz(rd_i64(&format!("/sys/devices/system/cpu/cpu{first}/cpufreq/scaling_cur_freq")) as u64))).collect();
+            let clocks: Vec<String> = clusters.iter().map(|(cpus, name)| format!("{name} {}", mhz(rd_i64(&format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", cpus.first().copied().unwrap_or(0))) as u64))).collect();
             if let Some(all) = pc.first() {
                 m_cpu.set(&format!("{all:.0} %"), *all, Some(&clocks.join(" · ")));
             }
@@ -224,8 +234,9 @@ pub fn resources_page(s: &S) -> adw::NavigationPage {
             // VM RAM is shared memory, which the kernel counts as cache: show what is available instead
             m_mem.set(&format!("{:.1} of {:.1} GB", used / 1024.0, total_mb / 1024.0), used,
                       Some(&format!("available {:.1} GB · swap {:.1} of {:.1} GB", g("MemAvailable") / 1048576.0, swap / 1024.0, g("SwapTotal") / 1048576.0)));
-            let w = rd_i64("/sys/class/power_supply/battery/power_now").abs() as f64 / 1e6;
-            let cur = rd_i64("/sys/class/power_supply/battery/current_now");
+            let batt = mship_core::device::power_supply("Battery").unwrap_or_default();
+            let w = rd_i64(&batt.join("power_now").to_string_lossy()).abs() as f64 / 1e6;
+            let cur = rd_i64(&batt.join("current_now").to_string_lossy());
             m_pwr.set(&format!("{w:.1} W"), w, Some(if cur > 0 { "charging" } else { "from the battery" }));
             let t = thermal();
             let names = [("cpu", "CPU"), ("gpu", "GPU"), ("video", "video"), ("battery", "battery")];
@@ -344,8 +355,9 @@ pub fn about_page(_s: &S) -> adw::NavigationPage {
     let up: f64 = std::fs::read_to_string("/proc/uptime").ok().and_then(|u| u.split_whitespace().next()?.parse().ok()).unwrap_or(0.0);
     let gb = |blocks: u64| blocks * st.f_frsize / (1 << 30);
     for (t, sub) in [
-        ("Device", "Motorola nio (Snapdragon 870) — mothershipOS host".to_string()),
-        ("Kernel", format!("{} ({}), KVM at EL2", cstr(&un.release), cstr(&un.machine))),
+        ("Device", std::fs::read_to_string("/sys/firmware/devicetree/base/model").map(|m| m.trim_end_matches('\0').to_string()).unwrap_or_else(|_| "unknown".into())),
+        ("Kernel", format!("{} ({}), {}", cstr(&un.release), cstr(&un.machine),
+                           if std::path::Path::new("/dev/kvm").exists() { "KVM at EL2" } else { "no KVM (EL1): no VMs" })),
         ("Memory", format!("{} MB free of {} MB", m.get("MemAvailable").copied().unwrap_or(0) / 1024, m.get("MemTotal").copied().unwrap_or(0) / 1024)),
         ("Storage", format!("{} GB free of {} GB", gb(st.f_bavail), gb(st.f_blocks))),
         ("Uptime", format!("{} h {} min", (up / 3600.0) as u64, (up % 3600.0 / 60.0) as u64)),

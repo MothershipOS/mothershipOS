@@ -675,7 +675,7 @@ impl RawAe {
         for y in 0..height {
             let row = &raw[y * stride..(y + 1) * stride];
             let o = &mut out[y * width * 4..(y + 1) * width * 4];
-            for (g, px) in row.chunks_exact(5).enumerate() {
+            for (g, px) in row.as_chunks::<5>().0.iter().enumerate() {
                 for k in 0..4 {
                     let v = ((px[k] as usize) << 2) | ((px[4] as usize >> (2 * k)) & 3);
                     let b = self.lut[v];
@@ -1031,10 +1031,10 @@ impl Service {
             let on = self.lent.as_ref().and_then(|vm| self.vms.get(vm)).and_then(|n| n.get(i)).is_some_and(|n| n.light);
             for l in &c.lights {
                 let value = if on { std::fs::read_to_string(l.join("max_brightness")).map(|m| m.trim().to_string()).unwrap_or("1".into()) } else { "0".into() };
-                if std::fs::read_to_string(l.join("brightness")).map(|b| b.trim().to_string()).ok().as_deref() != Some(value.as_str()) {
-                    if let Err(e) = std::fs::write(l.join("brightness"), &value) {
-                        log(format!("{}: {e}", l.display()));
-                    }
+                if std::fs::read_to_string(l.join("brightness")).map(|b| b.trim().to_string()).ok().as_deref() != Some(value.as_str())
+                    && let Err(e) = std::fs::write(l.join("brightness"), &value)
+                {
+                    log(format!("{}: {e}", l.display()));
                 }
             }
         }

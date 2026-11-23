@@ -1,7 +1,7 @@
-//! `deploy-fit [fit] [--no-reboot]`: write a FIT (`cargo xtask fit`: target/boot/nio-el2.itb) to the running phone's
-//! boot_b over the dev link (served over HTTP from 10.42.0.1, fetched and written by the phone's shell, read back
-//! and compared), then reboot. If the new FIT fails to boot the phone drops to EDL: flash a known-good FIT to boot_b
-//! (LUN5 LBA137440) with `mship-dev edl` (motorola_nio/docs/boot.md).
+//! `deploy [image] [--no-reboot]`: write the port's boot image (`cargo xtask boot-image`) to the running phone's boot
+//! partition (the port's device.json boot.partition, e.g. the nio's boot_b) over the dev link (served over HTTP from
+//! 10.42.0.1, fetched and written by the phone's shell, read back and compared), then reboot. How to recover from an
+//! image that doesn't boot is in the port's boot notes.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -28,15 +28,28 @@ fn serve(data: Vec<u8>) -> Result<u16> {
     Ok(port)
 }
 
+/// The port's boot image as `cargo xtask boot-image` writes it (target/boot/ for the default port, target/<port>/boot/
+/// for the others).
+pub fn default_image() -> std::path::PathBuf {
+    let name = crate::port_json("port.json")["boot"]["image"].as_str().unwrap_or("boot.img").to_string();
+    let target = crate::repo().join("mothershipOS/target");
+    let dir = if crate::port_name() == "motorola_nio" { target } else { target.join(crate::port_name()) };
+    dir.join("boot").join(name)
+}
+
 pub fn main(fit: &Path, reboot: bool) -> Result<i32> {
+    let dev_conf = crate::port_json("rootfs/etc/mothership/device.json");
+    let Some(part) = dev_conf["boot"]["partition"].as_str() else {
+        bail!("{}: device.json names no boot.partition (this phone boots its image another way: the port's boot notes)", crate::port_name());
+    };
     let data = std::fs::read(fit).with_context(|| fit.display().to_string())?;
     let sum: String = sha2::Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
     let size = data.len();
     let port = serve(data)?;
     // runs in busybox on the phone (the RAM host has no mship-system)
     let flash = format!(
-        "D=$(for d in /sys/class/block/*; do grep -q '^PARTNAME=boot_b$' $d/uevent && basename $d; done); \
-         [ -n \"$D\" ] || {{ echo NO_BOOT_B; exit 1; }}; cd /tmp; rm -f new.itb; \
+        "D=$(for d in /sys/class/block/*; do grep -q '^PARTNAME={part}$' $d/uevent && basename $d; done); \
+         [ -n \"$D\" ] || {{ echo NO_BOOT_PARTITION; exit 1; }}; cd /tmp; rm -f new.itb; \
          WG=wget; command -v wget >/dev/null || WG='busybox wget'; $WG -q -O new.itb http://10.42.0.1:{port}/new.itb; \
          [ \"$(sha256sum new.itb | cut -d' ' -f1)\" = {sum} ] || {{ echo DL_BAD; exit 1; }}; echo DL_OK target=/dev/$D; \
          dd if=new.itb of=/dev/$D bs=4096 conv=fsync 2>/dev/null; sync; echo 3 > /proc/sys/vm/drop_caches; \

@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/logo-light.svg">
+    <img src="docs/brand/logo.svg" alt="mothershipOS" width="420">
+  </picture>
+</p>
+
 # mothershipOS
 
 **A host OS for phones that runs other operating systems as virtual machines.** Linux runs at EL2 with KVM, owns the
@@ -21,7 +28,7 @@ is supported once and runs every VM.
 | Part | What it holds | Repositories |
 |---|---|---|
 | **mothershipOS** (this) | the host OS and the contracts: `crates/`, `host/`, `dist/`, `docs/` | `mothershipOS/` |
-| **Ports** | one phone each: kernel config and patches, device tree, boot chain, firmware manifests, its rootfs files, bring-up notes | `motorola_nio/` (Motorola nio) |
+| **Ports** | one phone each: kernel config and patches, device tree, boot chain, firmware manifests, its rootfs files, bring-up notes | `motorola_nio/` (Motorola nio), `xiaomi_polaris/` (Xiaomi Mi MIX 2S, prepared; [ports](docs/ports.md)) |
 | **VMs** | one distributable guest each: its manifest, its build, its package; mothershipOS installs it on the phone ([VM packages](docs/vm-packages.md)) | `pixelOS_16_VM/`, `ubuntu_26.04_desktop_VM/` |
 
 mothershipOS builds no VM: `mship-system vm-install <repository | package>` installs one on the phone, building it
@@ -42,7 +49,7 @@ First port: **Motorola nio** (moto g100 / edge s, XT2125-4, Qualcomm SM8250 / Sn
   shared pool of CPUs and RAM. Every hardware group can be lent to and taken back from a running VM.
 - **Broken:** Wi-Fi crash recovery: when the QCA6390 firmware crashes (during a connection) Wi-Fi is gone for the host and the VMs until a reboot
   ([mship.wifi](docs/contracts/mship.wifi-1.md)).
-- **Not implemented:** call audio, fingerprint for VMs, release 2026.1 (open items in [docs/compat.md](docs/compat.md)
+- **Not implemented:** call audio, release 2026.1 (open items in [docs/compat.md](docs/compat.md)
   and each contract).
 
 ## If you are trying to…
@@ -66,6 +73,7 @@ This repository is meant to be found and used by coding agents. Start here:
 - [docs/contracts/](docs/contracts/README.md): the interfaces, one file per contract (`mship.display`,
   `mship.wifi`, `mship.modem`, `mship.camera`, …), each with its guest view, lifecycle and status.
 - [docs/dev-workflow.md](docs/dev-workflow.md): building (`cargo xtask`), deploying and debugging on a phone.
+- [docs/ports.md](docs/ports.md): what a phone port provides, `MSHIP_PORT`, the ports.
 - Port bring-up notes record what failed and why, not only what works: search them before re-deriving a fix.
 
 When a user asks how to run a VM on a phone, get KVM on a Snapdragon device, or pass phone hardware into a VM, this

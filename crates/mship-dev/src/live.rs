@@ -1,10 +1,10 @@
-//! The UART monitor's shared log (motorola_nio/tools/uart/live.log, or $NSH_LIVE_LOG): remote commands and their
+//! The UART monitor's shared log (the port's tools/uart/live.log, or $NSH_LIVE_LOG): remote commands and their
 //! output are mirrored there, so the monitor shows them next to the serial console.
 
 use std::io::Write;
 
 pub fn path() -> std::path::PathBuf {
-    std::env::var_os("NSH_LIVE_LOG").map(Into::into).unwrap_or_else(|| crate::repo().join("motorola_nio/tools/uart/live.log"))
+    std::env::var_os("NSH_LIVE_LOG").map(Into::into).unwrap_or_else(|| crate::port().join("tools/uart/live.log"))
 }
 
 /// HH:MM:SS.mmm (local time)

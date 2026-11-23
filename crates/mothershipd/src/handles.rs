@@ -13,14 +13,16 @@ pub const SELF: &str = "mothershipd";
 
 /// What mothershipd lends itself (the session's devices).
 fn builtins() -> Vec<Handle> {
+    let p = mship_core::device::panel();
+    let (w, h, hz, dpi) = p.as_ref().map_or((0, 0, 60, 400), |p| (p.width, p.height, p.refresh_hz, p.dpi));
     vec![
         Handle::new("display:panel0", "mship.display", "Display & touchscreen", "video-display-symbolic", Direction::Out, "display")
             .while_shown()
-            .caps(json!({"width": 1080, "height": 2520, "refresh_hz": 90, "dpi": 420})),
+            .caps(json!({"width": w, "height": h, "refresh_hz": hz, "dpi": dpi})),
         Handle::new("display-power:panel0", "mship.display-power", "Screen power", "video-display-symbolic", Direction::Out, "display").while_shown(),
         Handle::new("touch:panel0", "mship.touch", "Touchscreen", "input-touchpad-symbolic", Direction::In, "display")
             .while_shown()
-            .caps(json!({"width": 1080, "height": 2520, "max_contacts": 10})),
+            .caps(json!({"width": w, "height": h, "max_contacts": 10})),
         Handle::new("keys:power", "mship.keys", "Power key", "system-shutdown-symbolic", Direction::In, "display")
             .while_shown()
             .caps(json!({"keys": [116, 143]})),

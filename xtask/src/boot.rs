@@ -1,18 +1,22 @@
-//! The phone's boot: the host kernel, its initramfs and the FIT u-boot boots (motorola_nio).
+//! The phone's boot: the host kernel, its initramfs and the boot image (the port's: `MSHIP_PORT`, default
+//! motorola_nio; the names come from its port.json, docs/ports.md). Paths below are the port's.
 //!
-//! - `host-kernel`: the pinned LTS source (motorola_nio/kernel/sources.lock.json) with motorola_nio/kernel/patches, the
-//!   arm64 defconfig trimmed to Qualcomm plus the nio fragment (configs/nio-host.config, every request checked),
+//! - `host-kernel`: the pinned LTS source (kernel/sources.lock.json) with kernel/patches, the
+//!   arm64 defconfig trimmed to Qualcomm plus the port's fragment (port.json kernel.fragment, every request checked),
 //!   built in the toolchain of the running kernel (xtask/docker/host-kernel: Ubuntu 24.04, gcc 13.3, so existing
 //!   modules stay valid): target/host-kernel/build/arch/arm64/boot/Image and the modules (target/host-kernel/modroot,
 //!   zstd-compressed, with the EXTERNAL_MODULES in extra/)
 //! - `initramfs`: /init = mship-init (static), busybox for the RAM host's shells, early firmware
-//!   (motorola_nio/boot/initramfs.json) and the kernel's modules: target/boot/initramfs.cpio.gz. The modules travel
+//!   (boot/initramfs.json) and the kernel's modules: target/boot/initramfs.cpio.gz. The modules travel
 //!   with the kernel in the FIT; mship-init mounts them on the root's /usr/lib/modules/<release> (nothing on the
 //!   root disk to go stale)
-//! - `fit`: the FIT for boot_b (motorola_nio/boot/nio-el2.its: host kernel + nio-el2-display.dts + initramfs),
-//!   target/boot/nio-el2.itb; written to the phone with `mship-system boot-image <itb>`
-//! - `abl-dtb [--diagnostic] [--dtbo <stock dtbo image>]`: the ABL-path board DTB (motorola_nio/kernel/dts) compiled and
-//!   checked against the captured board facts (motorola_nio/kernel/evidence/nio-board.json)
+//! - `boot-image`: the port's boot image (port.json boot.format):
+//!   - `fit` (the nio: u-boot in hyp boots it): boot.its with boot.dts and the initramfs, e.g. target/boot/nio-el2.itb;
+//!     written to the phone with `mship-system boot-image <itb>` (`fit` is the old name of this task)
+//!   - `android` (the phone's own bootloader, e.g. `fastboot boot`): an Android boot image (header v0) with the gzip
+//!     kernel, the upstream board DTB appended (boot.dtb), the initramfs and boot.cmdline
+//! - `abl-dtb [--diagnostic] [--dtbo <stock dtbo image>]`: the nio's ABL-path board DTB (kernel/dts) compiled and
+//!   checked against the captured board facts (port.json abl_dtb)
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -26,8 +30,6 @@ use crate::TARGET;
 use crate::util::*;
 
 const KBUILD_IMAGE: &str = "mothership-host-kbuild:24.04";
-/// boot_b: 24576 blocks of 4 KiB
-const BOOT_B_SIZE: u64 = 24576 * 4096;
 
 fn host_source() -> Result<serde_json::Value> {
     let lock: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(port().join("kernel/sources.lock.json"))?)?;
@@ -90,6 +92,8 @@ fn check_fragment(config: &str, fragment: &str) -> Result<()> {
 pub struct Kernel {
     pub image: PathBuf,
     pub modroot: PathBuf,
+    /// the in-tree board DTBs (arch/arm64/boot/dts: qcom/<board>.dtb)
+    pub dtbs: PathBuf,
 }
 
 /// The external (not in-tree) modules built with the kernel, by name: each `<name>.c` (headers `<name>*.h`) in
@@ -97,17 +101,50 @@ pub struct Kernel {
 /// lives in kernel/wip). Our own drivers belong in the kernel as patches (kernel/patches, Kconfig, config fragment).
 const EXTERNAL_MODULES: &[&str] = &[];
 
+/// The boot logo (patch 0036, CONFIG_LOGO_MOTHERSHIP_CLUT224): the port's boot/splash.png as the plain PPM the
+/// kernel's pnmtologo takes (at most 224 colors; the background black, as the panel around it). Written only when it
+/// changed (no rebuild otherwise).
+fn boot_logo(png_path: &Path, ppm: &Path) -> Result<()> {
+    let mut dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(png_path).with_context(|| png_path.display().to_string())?));
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut r = dec.read_info()?;
+    let mut buf = vec![0; r.output_buffer_size()];
+    let info = r.next_frame(&mut buf)?;
+    let ch = match info.color_type {
+        png::ColorType::Rgb => 3,
+        png::ColorType::Rgba => 4,
+        t => bail!("{}: color type {t:?} (RGB or indexed expected)", png_path.display()),
+    };
+    let (w, h) = (info.width as usize, info.height as usize);
+    let mut colors = BTreeSet::new();
+    let mut out = format!("P3\n# mothershipOS boot logo, from boot/splash.png\n{w} {h}\n255\n");
+    for y in 0..h {
+        for x in 0..w {
+            let p = &buf[(y * w + x) * ch..][..3];
+            colors.insert((p[0], p[1], p[2]));
+            out.push_str(&format!("{} {} {}\n", p[0], p[1], p[2]));
+        }
+    }
+    ensure!(colors.len() <= 224, "{}: {} colors (the kernel logo takes 224)", png_path.display(), colors.len());
+    if std::fs::read_to_string(ppm).ok().as_deref() != Some(out.as_str()) {
+        std::fs::write(ppm, out)?;
+    }
+    Ok(())
+}
+
 pub fn host_kernel() -> Result<Kernel> {
-    let work = target_dir().join("host-kernel");
+    let work = port_target().join("host-kernel");
     std::fs::create_dir_all(&work)?;
+    let build_host = format!("KBUILD_BUILD_HOST={}", port_str("kernel/build_host").unwrap_or_else(|_| "mothership-build".into()));
     let tree = kernel_tree(&work, &host_source()?, &port().join("kernel/patches"))?;
+    boot_logo(&port().join("boot/splash.png"), &tree.join("drivers/video/logo/logo_mothership_clut224.ppm"))?;
     docker(&["build", "-q", "-t", KBUILD_IMAGE, &root().join("xtask/docker/host-kernel").to_string_lossy()])?;
     let user = format!("{}:{}", unsafe { libc::getuid() }, unsafe { libc::getgid() });
     let vol = format!("{}:/k", host_path(&work)?);
     let tree_name = tree.file_name().unwrap().to_string_lossy().into_owned();
     let kmake = |args: &[&str]| -> Result<()> {
         let mut a: Vec<String> = ["run", "--rm", "-u", &user, "-v", &vol, "-w", "/k"].iter().map(|s| s.to_string()).collect();
-        for e in ["KBUILD_BUILD_USER=mothership", "KBUILD_BUILD_HOST=nio-build", "KBUILD_BUILD_TIMESTAMP=2026-09-27 00:00:00 UTC", "KBUILD_BUILD_VERSION=1"] {
+        for e in ["KBUILD_BUILD_USER=mothership", build_host.as_str(), "KBUILD_BUILD_TIMESTAMP=2026-09-27 00:00:00 UTC", "KBUILD_BUILD_VERSION=1"] {
             a.extend(["-e".into(), e.into()]);
         }
         a.extend([KBUILD_IMAGE.into(), "make".into(), "-s".into(), "-C".into(), format!("/k/{tree_name}"), "O=/k/build".into(),
@@ -117,7 +154,7 @@ pub fn host_kernel() -> Result<Kernel> {
     };
     let out = work.join("build");
     std::fs::create_dir_all(&out)?;
-    // configure: arm64 defconfig, other SoC families off (generic arm64 kept), no debug info, the nio fragment
+    // configure: arm64 defconfig, other SoC families off (generic arm64 kept), no debug info, the port's fragment
     kmake(&["defconfig"])?;
     let platforms = std::fs::read_to_string(tree.join("arch/arm64/Kconfig.platforms"))?;
     let mut changes: Vec<(String, Option<String>)> = platforms
@@ -127,19 +164,20 @@ pub fn host_kernel() -> Result<Kernel> {
         .map(|s| (format!("CONFIG_ARCH_{s}"), None))
         .collect();
     changes.extend([("CONFIG_DEBUG_INFO".into(), None), ("CONFIG_DEBUG_INFO_BTF".into(), None), ("CONFIG_DEBUG_INFO_NONE".into(), Some("y".into()))]);
-    let fragment = std::fs::read_to_string(port().join("kernel/configs/nio-host.config"))?;
+    let fragment_path = port().join(port_str("kernel/fragment")?);
+    let fragment = std::fs::read_to_string(&fragment_path).with_context(|| fragment_path.display().to_string())?;
     changes.extend(config_entries(&fragment));
     let config = out.join(".config");
     std::fs::write(&config, config_set(&std::fs::read_to_string(&config)?, &changes))?;
     kmake(&["olddefconfig"])?;
     check_fragment(&std::fs::read_to_string(&config)?, &fragment)?;
     kmake(&["savedefconfig"])?;
-    let committed = port().join("kernel/configs/nio-host.defconfig");
+    let committed = port().join(port_str("kernel/defconfig")?);
     if std::fs::read(out.join("defconfig")).ok() != std::fs::read(&committed).ok() {
         println!("note: the resolved defconfig ({}) differs from {}", out.join("defconfig").display(), committed.display());
     }
     // build
-    kmake(&["-j", &jobs(), "Image", "modules"])?;
+    kmake(&["-j", &jobs(), "Image", "modules", "dtbs"])?;
     let modroot = work.join("modroot");
     let _ = std::fs::remove_dir_all(&modroot);
     kmake(&["INSTALL_MOD_PATH=/k/modroot", "INSTALL_MOD_STRIP=1", "modules_install"])?;
@@ -176,7 +214,7 @@ pub fn host_kernel() -> Result<Kernel> {
     });
     std::fs::write(out.join("build-manifest.json"), serde_json::to_string_pretty(&manifest)? + "\n")?;
     println!("{}\n{}", image.display(), modroot.display());
-    Ok(Kernel { image, modroot })
+    Ok(Kernel { image, modroot, dtbs: out.join("arch/arm64/boot/dts") })
 }
 
 // ---------------------------------------------------------------- initramfs
@@ -252,7 +290,7 @@ const BD_PLACEHOLDER: &str = "local-bd-address = [00 00 00 00 00 00];";
 /// The DT with the phone's own Bluetooth address (the port's boot/bd-address, "00:11:22:33:44:55", kept out of git:
 /// it identifies the phone) in place of the placeholder; without the file Bluetooth comes up without an address.
 fn with_bd_address(dts: &str) -> Result<String> {
-    ensure!(dts.contains(BD_PLACEHOLDER), "nio-el2-display.dts: no `{BD_PLACEHOLDER}`");
+    ensure!(dts.contains(BD_PLACEHOLDER), "the board DTS: no `{BD_PLACEHOLDER}`");
     let file = port().join("boot/bd-address");
     let Ok(addr) = std::fs::read_to_string(&file) else {
         println!("note: no {} (the phone's Bluetooth address): Bluetooth gets none", file.display());
@@ -269,7 +307,7 @@ fn with_bd_address(dts: &str) -> Result<String> {
 /// The pinned busybox binary, as a file (the release installs it for mship-telnet.service).
 pub fn busybox_binary() -> Result<PathBuf> {
     let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(port().join("boot/initramfs.json"))?)?;
-    let work = target_dir().join("boot");
+    let work = port_target().join("boot");
     std::fs::create_dir_all(&work)?;
     let out = work.join("busybox");
     std::fs::write(&out, busybox(&manifest, &work)?)?;
@@ -281,7 +319,7 @@ pub fn busybox_binary() -> Result<PathBuf> {
 /// /lib/modules/<release>).
 pub fn initramfs(modroot: &Path) -> Result<PathBuf> {
     let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(port().join("boot/initramfs.json"))?)?;
-    let work = target_dir().join("boot");
+    let work = port_target().join("boot");
     std::fs::create_dir_all(&work)?;
     let mut c = Cpio::new();
     for d in ["bin", "dev", "proc", "sys", "tmp", "usr", "usr/bin"] {
@@ -302,7 +340,7 @@ pub fn initramfs(modroot: &Path) -> Result<PathBuf> {
                 // initramfs.json `local` paths are repo-prefixed (e.g. motorola_nio/firmware/…),
                 // relative to the directory that holds mothershipOS and the port side by side
                 let p = root().parent().unwrap().join(local);
-                let d = std::fs::read(&p).with_context(|| format!("{}: the phone's firmware (motorola_nio/firmware, not in git)", p.display()))?;
+                let d = std::fs::read(&p).with_context(|| format!("{}: the phone's firmware (the port's firmware/, not in git)", p.display()))?;
                 ensure!(sha256_hex(&d) == sum, "{}: SHA-256 differs from initramfs.json", p.display());
                 d
             }
@@ -358,29 +396,147 @@ fn modules(c: &mut Cpio, modroot: &Path) -> Result<()> {
 
 // ---------------------------------------------------------------- FIT
 
+/// The port's boot image (port.json boot.format).
+pub fn boot_image() -> Result<PathBuf> {
+    match port_str("boot/format")?.as_str() {
+        "fit" => fit(),
+        "android" => android_boot_image(),
+        f => bail!("port.json boot.format {f:?}: fit or android"),
+    }
+}
+
+fn check_size(out: &Path) -> Result<()> {
+    let size = std::fs::metadata(out)?.len();
+    let max = port_u64("boot/max_size")?;
+    ensure!(size <= max, "{}: {size} B exceeds the boot partition ({max} B, port.json boot.max_size)", out.display());
+    println!("{} {size} B sha256={}", out.display(), &sha256(out)?[..16]);
+    Ok(())
+}
+
+/// A FIT for u-boot (the nio's: boot_b, booted by u-boot in hyp_b).
 pub fn fit() -> Result<PathBuf> {
+    ensure!(port_str("boot/format")? == "fit", "{}: its boot image is not a FIT (cargo xtask boot-image)", port_name());
     let kernel = host_kernel()?;
     println!("modules for this kernel: {}", kernel.modroot.display());
     let initramfs = initramfs(&kernel.modroot)?;
-    let work = target_dir().join("boot");
+    let work = port_target().join("boot");
     let stage = work.join("fit");
     let _ = std::fs::remove_dir_all(&stage);
     std::fs::create_dir_all(&stage)?;
-    // the names nio-el2.its includes
+    // the names the .its includes: Image, initramfs.cpio.gz and boot.dtb's name
     std::fs::copy(&kernel.image, stage.join("Image"))?;
     std::fs::copy(&initramfs, stage.join("initramfs.cpio.gz"))?;
-    // the board DT: nio-el2-display.dts (the display, audio, USB-C and video additions on top of nio-el2.dts), with
-    // this phone's Bluetooth address in it (its /include/s still from the port's boot/)
-    let dts = with_bd_address(&std::fs::read_to_string(port().join("boot/nio-el2-display.dts"))?)?;
-    std::fs::write(stage.join("nio-el2-display.dts"), dts)?;
-    run_in(&stage, &["dtc", "-q", "-i", &port().join("boot").to_string_lossy(), "-I", "dts", "-O", "dtb", "-o", "nio.dtb", "nio-el2-display.dts"])?;
-    let out = work.join("nio-el2.itb");
+    // the board DT (port.json boot.dts; the nio's: the display, audio, USB-C and video additions on top of
+    // nio-el2.dts), with this phone's Bluetooth address in it (its /include/s still from the port's boot/)
+    let dts_rel = port_str("boot/dts")?;
+    let dts_name = Path::new(&dts_rel).file_name().context("boot.dts")?.to_string_lossy().into_owned();
+    let dts = with_bd_address(&std::fs::read_to_string(port().join(&dts_rel))?)?;
+    std::fs::write(stage.join(&dts_name), dts)?;
+    run_in(&stage, &["dtc", "-q", "-i", &port().join("boot").to_string_lossy(), "-I", "dts", "-O", "dtb", "-o", &port_str("boot/dtb")?, &dts_name])?;
+    let out = work.join(port_str("boot/image")?);
     // dtc resolves /incbin/ next to the .its, so it goes beside the files
-    std::fs::copy(port().join("boot/nio-el2.its"), stage.join("nio-el2.its"))?;
-    run_in(&stage, &["mkimage", "-q", "-f", "nio-el2.its", &out.to_string_lossy()])?;
-    let size = std::fs::metadata(&out)?.len();
-    ensure!(size <= BOOT_B_SIZE, "FIT {size} B exceeds boot_b ({BOOT_B_SIZE} B)");
-    println!("{} {size} B sha256={}", out.display(), &sha256(&out)?[..16]);
+    let its_rel = port_str("boot/its")?;
+    let its_name = Path::new(&its_rel).file_name().context("boot.its")?.to_string_lossy().into_owned();
+    std::fs::copy(port().join(&its_rel), stage.join(&its_name))?;
+    run_in(&stage, &["mkimage", "-q", "-f", &its_name, &out.to_string_lossy()])?;
+    check_size(&out)?;
+    Ok(out)
+}
+
+/// An Android boot image, header version 0 (what mkbootimg writes): the bootloader (ABL) loads the kernel, the
+/// ramdisk and the tags (the DTB, here appended to the gzip kernel as ABL takes it on the phones of that time) at
+/// base + offset and boots the kernel at EL1 with the image's command line plus its own androidboot.* settings.
+pub fn android_boot_image() -> Result<PathBuf> {
+    ensure!(port_u64("boot/header_version")? == 0, "port.json boot.header_version: only 0 is built");
+    let kernel = host_kernel()?;
+    let initramfs = std::fs::read(initramfs(&kernel.modroot)?)?;
+    let dtb_rel = port_str("boot/dtb")?;
+    let dtb = std::fs::read(kernel.dtbs.join(&dtb_rel)).with_context(|| format!("{dtb_rel}: not built by the kernel (port.json boot.dtb)"))?;
+    // Image.gz-dtb
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    gz.write_all(&std::fs::read(&kernel.image)?)?;
+    let mut kimg = gz.finish()?;
+    kimg.extend(&dtb);
+    let cmdline = port_str("boot/cmdline")?;
+    let img = bootimg_v0(&kimg, &initramfs, &BootImgLayout {
+        base: port_u64("boot/base")? as u32,
+        kernel_offset: port_u64("boot/kernel_offset")? as u32,
+        ramdisk_offset: port_u64("boot/ramdisk_offset")? as u32,
+        tags_offset: port_u64("boot/tags_offset")? as u32,
+        page_size: port_u64("boot/page_size")? as u32,
+        cmdline: &cmdline,
+    })?;
+    let out = port_target().join("boot").join(port_str("boot/image")?);
+    std::fs::write(&out, img)?;
+    check_size(&out)?;
+    Ok(out)
+}
+
+pub struct BootImgLayout<'a> {
+    pub base: u32,
+    pub kernel_offset: u32,
+    pub ramdisk_offset: u32,
+    pub tags_offset: u32,
+    pub page_size: u32,
+    pub cmdline: &'a str,
+}
+
+/// boot_img_hdr_v0 (AOSP system/tools/mkbootimg) + kernel + ramdisk, each padded to the page size; no second stage.
+pub fn bootimg_v0(kernel: &[u8], ramdisk: &[u8], l: &BootImgLayout) -> Result<Vec<u8>> {
+    use sha1::Digest as _;
+    ensure!(l.cmdline.len() < 512 + 1024, "boot command line longer than 1535 bytes");
+    let mut h = Vec::with_capacity(l.page_size as usize);
+    let u32le = |h: &mut Vec<u8>, v: u32| h.extend(v.to_le_bytes());
+    h.extend(b"ANDROID!");
+    for v in [kernel.len() as u32, l.base + l.kernel_offset, ramdisk.len() as u32, l.base + l.ramdisk_offset, 0, 0, l.base + l.tags_offset,
+              l.page_size, 0, 0] {
+        u32le(&mut h, v);
+    }
+    h.extend([0u8; 16]); // name
+    let cmd = l.cmdline.as_bytes();
+    let (main, extra) = cmd.split_at(cmd.len().min(511));
+    let mut field = [0u8; 512];
+    field[..main.len()].copy_from_slice(main);
+    h.extend(field);
+    // id: SHA-1 over each part and its size (mkbootimg); the bootloader may compare it
+    let mut sha = sha1::Sha1::new();
+    for part in [kernel, ramdisk, &[]] {
+        sha.update(part);
+        sha.update((part.len() as u32).to_le_bytes());
+    }
+    let mut id = [0u8; 32];
+    id[..20].copy_from_slice(&sha.finalize());
+    h.extend(id);
+    let mut field = [0u8; 1024];
+    field[..extra.len()].copy_from_slice(extra);
+    h.extend(field);
+    let page = l.page_size as usize;
+    let pad = |v: &mut Vec<u8>| v.resize(v.len().div_ceil(page) * page, 0);
+    pad(&mut h);
+    let mut img = h;
+    img.extend(kernel);
+    pad(&mut img);
+    img.extend(ramdisk);
+    pad(&mut img);
+    Ok(img)
+}
+
+// ---------------------------------------------------------------- the port's root firmware
+
+/// The firmware the port pins for the root filesystem (port.json `firmware`: a manifest of {path, url, sha256}),
+/// fetched once and checked: (path in the root, local file). Ports without one: none (the nio's firmware is placed
+/// on the phone by hand, motorola_nio/firmware).
+pub fn port_firmware() -> Result<Vec<(String, PathBuf)>> {
+    let Ok(rel) = port_str("firmware") else { return Ok(vec![]) };
+    let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(port().join(&rel))?)?;
+    let dir = port_target().join("firmware");
+    let mut out = vec![];
+    for f in manifest["files"].as_array().context("firmware manifest: files")? {
+        let path = f["path"].as_str().context("firmware path")?;
+        ensure!(path.starts_with("lib/firmware/") && !path.contains(".."), "{path}: not under lib/firmware/");
+        let local = fetch(f["url"].as_str().context("firmware url")?, f["sha256"].as_str().context("firmware sha256")?, &dir.join(path))?;
+        out.push((path.to_string(), local));
+    }
     Ok(out)
 }
 
@@ -429,10 +585,11 @@ fn real_nodes(dtb: &Path) -> Result<Vec<String>> {
 pub fn abl_dtb(args: &[String]) -> Result<PathBuf> {
     let diagnostic = args.iter().any(|a| a == "--diagnostic");
     let dtbo = args.iter().position(|a| a == "--dtbo").and_then(|i| args.get(i + 1)).map(PathBuf::from);
-    let work = target_dir().join("host-kernel");
+    let work = port_target().join("host-kernel");
     let tree = kernel_tree(&work, &host_source()?, &port().join("kernel/patches"))?;
-    let variant = if diagnostic { "sm8250-motorola-nio-diagnostic" } else { "sm8250-motorola-nio" };
-    let out = target_dir().join(if diagnostic { "nio-dtb-diagnostic" } else { "nio-dtb" });
+    let base = port_str("abl_dtb/variant").context("this port has no ABL-path board DTB")?;
+    let variant = if diagnostic { format!("{base}-diagnostic") } else { base.clone() };
+    let out = port_target().join(if diagnostic { "abl-dtb-diagnostic" } else { "abl-dtb" });
     std::fs::create_dir_all(&out)?;
     let board = port().join("kernel/dts").join(format!("{variant}.dts"));
     let pp = out.join(format!("{variant}.dts.pp"));
@@ -452,7 +609,7 @@ pub fn abl_dtb(args: &[String]) -> Result<PathBuf> {
 
     let bytes = std::fs::read(&dtb)?;
     let fdt = fdt::Fdt::new(&bytes).map_err(|e| anyhow::anyhow!("{}: {e:?}", dtb.display()))?;
-    let evidence: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(port().join("kernel/evidence/nio-board.json"))?)?;
+    let evidence: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(port().join(port_str("abl_dtb/evidence")?))?)?;
     // fixed reservations: exactly the captured ones, no-map, not overlapping
     let rm = fdt.find_node("/reserved-memory").context("no /reserved-memory")?;
     let mut actual = vec![];
@@ -480,8 +637,13 @@ pub fn abl_dtb(args: &[String]) -> Result<PathBuf> {
         let want: Vec<u32> = evidence[key].as_array().context(key)?.iter().filter_map(|v| v.as_u64().map(|v| v as u32)).collect();
         ensure!(cells(&fdt, "/", prop)? == want, "board selection IDs changed: {prop}");
     }
-    ensure!(string(&fdt, "/", "model")?.contains("Qualcomm Technologies, Inc."), "Motorola ABL rejects a base DTB whose model lacks \"Qualcomm Technologies, Inc.\"");
-    ensure!(!string(&fdt, "/chosen", "bootargs")?.is_empty(), "Motorola ABL asserts when /chosen/bootargs is missing");
+    // the bootloader's own demands, from the board facts (the nio's ABL: the model must name Qualcomm, bootargs present)
+    if let Some(m) = evidence["abl_model_must_contain"].as_str() {
+        ensure!(string(&fdt, "/", "model")?.contains(m), "the bootloader rejects a base DTB whose model lacks {m:?}");
+    }
+    if evidence["abl_requires_bootargs"].as_bool() == Some(true) {
+        ensure!(!string(&fdt, "/chosen", "bootargs")?.is_empty(), "the bootloader asserts when /chosen/bootargs is missing");
+    }
     let uart = string(&fdt, "/aliases", "serial0")?;
     let console = evidence["enabled_console_address"].as_u64().context("enabled_console_address")? as u32;
     ensure!(cells(&fdt, &uart, "reg")?.get(1) == Some(&console) && string(&fdt, &uart, "status")? == "okay", "console does not match the enabled downstream UART");
@@ -539,6 +701,20 @@ mod tests {
         assert_eq!(merged, "CONFIG_A=y\nCONFIG_B=y\n# CONFIG_C is not set\nCONFIG_D=\"x\"\n");
         check_fragment(&merged, frag).unwrap();
         assert!(check_fragment(cfg, frag).is_err());
+    }
+
+    #[test]
+    fn bootimg_header_v0() {
+        let l = BootImgLayout { base: 0, kernel_offset: 0x8000, ramdisk_offset: 0x100_0000, tags_offset: 0x100, page_size: 4096, cmdline: "console=tty0" };
+        let img = bootimg_v0(&[1; 5000], &[2; 10], &l).unwrap();
+        assert_eq!(&img[..8], b"ANDROID!");
+        let u = |o: usize| u32::from_le_bytes(img[o..o + 4].try_into().unwrap());
+        assert_eq!((u(8), u(12), u(16), u(20), u(32), u(36), u(40)), (5000, 0x8000, 10, 0x100_0000, 0x100, 4096, 0));
+        assert_eq!(&img[64..76], b"console=tty0");
+        // header page, two kernel pages, one ramdisk page
+        assert_eq!(img.len(), 4 * 4096);
+        assert_eq!(img[4096], 1);
+        assert_eq!(img[3 * 4096], 2);
     }
 
     #[test]

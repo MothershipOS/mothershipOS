@@ -5,11 +5,14 @@
 //!
 //! - `check`: clippy (warnings are errors) and the tests
 //! - `gpu`: the phone's VMM (host/gpu): crosvm, virglrenderer, minigbm, pinned and patched, for /opt/mship-gpu
-//! - `host-kernel`, `initramfs`, `fit`, `abl-dtb`: the phone's boot (motorola_nio; see boot.rs)
+//! - `host-kernel`, `initramfs`, `boot-image`, `abl-dtb`: the phone's boot (the port's: `MSHIP_PORT`, default
+//!   motorola_nio; see boot.rs and docs/ports.md)
+//! - `port-firmware`: the firmware the port pins for the root (port.json firmware), fetched and checked
 //! - `sway`, `vhost-sound`: sway-mship with its wlroots, the VMs' sound backend (host/sway, host/vm-sound)
 //! - `dist`: build every program for the phone and pack the release, target/dist/mothershipos-<release>.tar: a root
 //!   filesystem overlay (the programs, dist/rootfs and the port's rootfs: systemd units, udev rules, configuration,
-//!   the sway session). On the phone, `mship-system install <tar>` installs it.
+//!   the sway session) and the port's pinned root firmware (proprietary when the port has any: don't publish such a
+//!   tarball). On the phone, `mship-system install <tar>` installs it.
 //!
 //! Nothing here builds a VM: each VM is a repository of its own with its own build, and mothershipOS installs it
 //! on the phone (`mship-system vm-install`, docs/vm-packages.md).
@@ -32,6 +35,7 @@ const PROGRAMS: &[(&str, &str)] = &[
     ("mship-battery", "usr/local/sbin"),
     ("mship-bt-bridge", "usr/local/sbin"),
     ("mship-camera", "usr/local/sbin"),
+    ("mship-fingerprint", "usr/local/sbin"),
     ("mship-gnss", "usr/local/sbin"),
     ("mship-modem", "usr/local/sbin"),
     ("mship-net", "usr/local/sbin"),
@@ -43,7 +47,6 @@ const PROGRAMS: &[(&str, &str)] = &[
     ("mship-launch", "usr/local/bin"),
     ("mship-presenter", "usr/local/bin"),
     ("mship-inputd", "usr/local/bin"),
-    ("fpc-test", "usr/local/bin"),
 ];
 
 /// gfxstream shims (cdylib crate, file name in Cuttlefish's crosvm directory)
@@ -104,8 +107,14 @@ fn dist() -> Result<()> {
         for f in files {
             let rel = f.strip_prefix(&overlay)?.to_string_lossy().into_owned();
             let owner = if rel.starts_with("home/mship/") { (1000, "mship") } else { rootown };
-            add_file(&mut tar, &f, &rel, 0o644, owner)?;
+            // scripts keep their exec bit (e.g. a port's workaround under usr/local/lib/mothership)
+            let exec = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&f)?.permissions()) & 0o111 != 0;
+            add_file(&mut tar, &f, &rel, if exec { 0o755 } else { 0o644 }, owner)?;
         }
+    }
+    // the port's pinned firmware for the root (port.json firmware: lib/firmware/...)
+    for (rel, f) in boot::port_firmware()? {
+        add_file(&mut tar, &f, &rel, 0o644, rootown)?;
     }
     // the dev link's telnet shell (mship-telnet.service) and mship-init's diagnostics in the root too
     add_file(&mut tar, &boot::busybox_binary()?, "usr/local/sbin/busybox", 0o755, rootown)?;
@@ -132,7 +141,9 @@ fn main() -> Result<()> {
         "gpu" => gpu::gpu().map(|_| ()),
         "host-kernel" => boot::host_kernel().map(|_| ()),
         "initramfs" => boot::host_kernel().and_then(|k| boot::initramfs(&k.modroot)).map(|_| ()),
+        "boot-image" => boot::boot_image().map(|_| ()),
         "fit" => boot::fit().map(|_| ()),
+        "port-firmware" => boot::port_firmware().map(|f| f.iter().for_each(|(r, p)| println!("{r}  {}", p.display()))),
         "abl-dtb" => boot::abl_dtb(&std::env::args().skip(2).collect::<Vec<_>>()).map(|_| ()),
         "sway" => host::sway().map(|_| ()),
         "vhost-sound" => host::vhost_sound().map(|_| ()),
@@ -140,7 +151,7 @@ fn main() -> Result<()> {
         "dist" => dist(),
         "" | "help" => {
             println!(
-                "cargo xtask <task>\n  check         clippy (warnings are errors) and the tests\n  gpu           the phone's VMM: crosvm, virglrenderer, minigbm\n  host-kernel   the phone's kernel and modules\n  initramfs     the phone's initramfs (mship-init, busybox, early firmware, the kernel's modules)\n  fit           the boot image for boot_b (kernel + DTB + initramfs)\n  abl-dtb [--diagnostic] [--dtbo <img>]  the ABL-path board DTB, checked\n  sway          sway-mship and its wlroots\n  vhost-sound   the VMs' sound backend\n  hexagonrpc    the sensor DSP's file server (hexagonrpcd)\n  dist          build for the phone and pack the release tarball (target/dist)"
+                "cargo xtask <task>\n  check         clippy (warnings are errors) and the tests\n  gpu           the phone's VMM: crosvm, virglrenderer, minigbm\n  host-kernel   the phone's kernel and modules\n  initramfs     the phone's initramfs (mship-init, busybox, early firmware, the kernel's modules)\n  boot-image    the port's boot image (FIT for the nio's boot_b, or an Android boot image)\n  port-firmware the port's pinned root firmware, fetched and checked\n  abl-dtb [--diagnostic] [--dtbo <img>]  the ABL-path board DTB, checked\n  sway          sway-mship and its wlroots\n  vhost-sound   the VMs' sound backend\n  hexagonrpc    the sensor DSP's file server (hexagonrpcd)\n  dist          build for the phone and pack the release tarball (target/dist)"
             );
             Ok(())
         }

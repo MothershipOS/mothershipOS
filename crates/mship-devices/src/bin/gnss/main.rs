@@ -7,6 +7,7 @@
 //!   its slot's console to (cuttlefish-arm64: hvc6). Only the VM holding the handle `location` gets epochs; the
 //!   others' slots are empty.
 //! - **the host**: clients of /run/mothership/gnss/host.sock (same protocol) get epochs while no VM holds it.
+//!
 //! The receiver runs only while the clients that get epochs asked for it (`$PMSHG,START`), at the shortest interval
 //! any of them asked for.
 //!

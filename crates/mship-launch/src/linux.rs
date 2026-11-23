@@ -1,6 +1,7 @@
 //! A Linux VM under crosvm (platform efi-virt-arm64): its own kernel, on the screen its manifest names.
 //!
-//! - vm.json "output": "DP-1" (default) = the external display, as below; "DSI-1" = the phone's panel: one display
+//! - vm.json "output": "external" (default, or a connector name like "DP-1") = the external display, as below;
+//!   "panel" = the phone's panel: one display
 //!   at the panel's size and density shown through a DRM lease while the VM holds the display, touch and buttons
 //!   through mship-inputd while lent (a phone OS: Sailfish OS, postmarketOS); the buttons are a buttons device
 //!   (power, volume, wake), not a keyboard
@@ -35,7 +36,7 @@ use std::time::Duration;
 use mship_core::api::Op;
 use mship_core::uevent::{poll, read_uevent, uevents};
 
-use crate::{CROSVM, GPU_LIBS, INPUTD, PRESENTER, Res, Vm, camera_nodes, daemon, env_or, err, evdev, log_file, net_args, signal, sway, venus_decoder, wait_for};
+use crate::{CROSVM, GPU_LIBS, INPUTD, PRESENTER, Res, Vm, camera_nodes, daemon, env_or, err, log_file, net_args, signal, sway, video_decoder, wait_for};
 
 /// The guest's buttons device (crosvm `--input custom`): power, volume, wake (mship-inputd sends these on keys.sock)
 const BUTTONS: &str = r#"{"name": "mothership buttons", "serial_name": "mship-buttons",
@@ -45,19 +46,24 @@ const BUTTONS: &str = r#"{"name": "mothership buttons", "serial_name": "mship-bu
 const VHOST_SOUND: &str = "/usr/local/bin/vhost-device-sound";
 /// where releases before 2026.1's VM packages put the guests' kernel (VMs installed then name none)
 const OLD_GUEST_KERNEL: &str = "/usr/share/mothership/guest/Image";
-const CARD: &str = "mothershipniosp";
-const ASOUNDRC: &str = r#"pcm.mship_dp_mix { type dmix; ipc_key 5678293; ipc_perm 0660; slave { pcm "hw:CARD=mothershipniosp,DEV=1"; rate 48000; channels 2; format S16_LE; period_size 1024; buffer_size 4096 } }
-pcm.!default { type asym; playback.pcm { type plug; slave.pcm "mship_dp_mix" } capture.pcm "null" }
-ctl.!default { type hw; card mothershipniosp }
-"#;
-const EXT: &str = "DP-1";
-const PANEL_OUT: &str = "DSI-1";
-const PANEL: (u32, u32) = (1080, 2520);
+/// The external display's audio for the VM's sound backend: a dmix on the DisplayPort PCM (device.json dp_audio:
+/// {"card": "<ALSA card id>", "device": n, "mixer": [["<control>", "<value>"], ...]}: the routes `amixer cset` sets
+/// first; without it the VM gets no DisplayPort audio).
+fn asoundrc() -> Option<String> {
+    let c = &mship_core::device::conf()["dp_audio"];
+    let card = c["card"].as_str()?;
+    let dev = c["device"].as_u64().unwrap_or(0);
+    Some(format!("pcm.mship_dp_mix {{ type dmix; ipc_key 5678293; ipc_perm 0660; slave {{ pcm \"hw:CARD={card},DEV={dev}\"; rate 48000; channels 2; format S16_LE; period_size 1024; buffer_size 4096 }} }}
+pcm.!default {{ type asym; playback.pcm {{ type plug; slave.pcm \"mship_dp_mix\" }} capture.pcm \"null\" }}
+ctl.!default {{ type hw; card {card} }}
+"))
+}
 
 fn drm_dp(file: &str) -> Option<String> {
     std::fs::read_dir("/sys/class/drm").ok()?.flatten().find_map(|e| {
         let n = e.file_name().to_string_lossy().into_owned();
-        if n.starts_with("card") && n.ends_with("-DP-1") { std::fs::read_to_string(e.path().join(file)).ok() } else { None }
+        let ext = mship_core::device::output("external");
+        if n.starts_with("card") && n.ends_with(&format!("-{ext}")) { std::fs::read_to_string(e.path().join(file)).ok() } else { None }
     })
 }
 
@@ -131,8 +137,8 @@ fn follow_monitor(vm: &Arc<Vm>, vm_pid: u32) {
                 let log = std::fs::read_to_string(me.path("display.log")).unwrap_or_default();
                 let last = log.lines().rev().find(|l| l.contains("lease granted") || l.contains("lease finished"));
                 if !last.is_some_and(|l| l.contains("lease granted")) {
-                    sway(&format!("lease_output {EXT} off"));
-                    sway(&format!("lease_output {EXT} on"));
+                    sway(&format!("lease_output {} off", ext(&me)));
+                    sway(&format!("lease_output {} on", ext(&me)));
                 }
             }
             match &ue {
@@ -148,10 +154,15 @@ fn follow_monitor(vm: &Arc<Vm>, vm_pid: u32) {
     });
 }
 
+/// The external display's connector (vm.json "output": "external" or a connector name).
+fn ext(vm: &Vm) -> String {
+    mship_core::device::output(vm.conf["output"].as_str().unwrap_or("external"))
+}
+
 pub fn run(vm: &Arc<Vm>) -> Res<i32> {
     let d = vm.dir.clone();
     let ds = vm.dir_str();
-    let panel = vm.conf["output"].as_str() == Some(PANEL_OUT);
+    let panel = mship_core::device::is_panel(vm.conf["output"].as_str().unwrap_or("external"));
     // first start of a new VM: cloud-init's NoCloud seed over HTTP on the host's address on the VM's internet card
     // (there once the shared internet is attached: the server waits for it)
     let mut ds_param = String::new();
@@ -173,7 +184,7 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
     // would draw into the buffer still on screen: tearing)
     let log = log_file(&d, "display")?;
     vm.helpers.spawn("presenter", Command::new(PRESENTER).arg(d.join("display.sock"))
-        .env("MSHIP_VM_OUTPUT", env_or("MSHIP_VM_OUTPUT", EXT))
+        .env("MSHIP_VM_OUTPUT", env_or("MSHIP_VM_OUTPUT", &ext(vm)))
         .env("MSHIP_VM_PRESENT", env_or("MSHIP_VM_PRESENT", "copy"))
         .stdout(log.try_clone().map_err(err)?).stderr(log))?;
     wait_for(&d.join("display.sock"), 30);
@@ -181,15 +192,20 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
     // sound: the backend opens ALSA "default", which its own config makes the DisplayPort device. dmix: the backend
     // keeps a placeholder open per stream while it opens the real one; plug: the guest's rate, channels and format;
     // capture: none (DP has no input)
-    let sound = env_or("MSHIP_VM_SOUND", "1") != "0";
+    let rc = asoundrc();
+    let sound = env_or("MSHIP_VM_SOUND", "1") != "0" && rc.is_some();
     let audio = d.join("audio");
     let mut snd = vec![];
     let holder = if sound {
         std::fs::create_dir_all(&audio).map_err(err)?;
-        std::fs::write(audio.join(".asoundrc"), ASOUNDRC).map_err(err)?;
+        std::fs::write(audio.join(".asoundrc"), rc.unwrap_or_default()).map_err(err)?;
         let log = log_file(&d, "sound")?;
-        let _ = Command::new("amixer").args(["-q", "-c", CARD, "cset", "name=DISPLAY_PORT_RX Audio Mixer MultiMedia2", "1"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let dp = &mship_core::device::conf()["dp_audio"];
+        for m in dp["mixer"].as_array().into_iter().flatten() {
+            let (Some(name), Some(v)) = (m[0].as_str(), m[1].as_str()) else { continue };
+            let _ = Command::new("amixer").args(["-q", "-c", dp["card"].as_str().unwrap_or_default(), "cset", &format!("name={name}"), v])
+                .stdout(Stdio::null()).stderr(Stdio::null()).status();
+        }
         let holder = hold_dp(vm, &audio);
         std::thread::sleep(Duration::from_secs(1));
         vm.helpers.spawn("sound", Command::new(VHOST_SOUND).args(["--socket", &format!("{ds}/sound.sock"), "--backend", "alsa"])
@@ -236,7 +252,7 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
     }
     // HW video decode (mship.video): the host Venus decoder via virtio-media (built into the guest kernel)
     if env_or("MSHIP_VM_VIDEO", "1") != "0"
-        && let Some(v) = venus_decoder()
+        && let Some(v) = video_decoder()
     {
         args.push(format!("--v4l2-proxy={v}"));
     }
@@ -268,17 +284,12 @@ pub fn run(vm: &Arc<Vm>) -> Res<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
-/// On the phone's panel (vm.json "output": "DSI-1"): as PixelOS's display and input, a plain Linux boot.
+/// On the phone's panel (vm.json "output": "panel"): as PixelOS's display and input, a plain Linux boot.
 fn run_panel(vm: &Arc<Vm>, params: &str) -> Res<i32> {
     let d = vm.dir.clone();
     let ds = vm.dir_str();
     // touch + volume keys + power key, reach the VM only while lent
-    let touch = std::env::var("MSHIP_VM_TOUCH").ok().or_else(|| evdev("NT36672C Touchscreen")).unwrap_or_default();
-    let keys = std::env::var("MSHIP_VM_KEYS").ok()
-        .unwrap_or_else(|| format!("{},{}", evdev("gpio-keys").unwrap_or_default(), evdev("pm8941_resin").unwrap_or_default()));
-    let pwr = std::env::var("MSHIP_VM_POWER").ok().unwrap_or_else(|| {
-        [evdev("pm8941_pwrkey"), evdev("NT36672C Wake Gesture")].into_iter().flatten().collect::<Vec<_>>().join(",")
-    });
+    let (touch, keys, pwr) = crate::input_devices();
     let log = log_file(&d, "inputd")?;
     vm.helpers.spawn("inputd", Command::new(INPUTD).args([&ds, &touch, &keys, &pwr])
         .stdout(log.try_clone().map_err(err)?).stderr(log))?;
@@ -293,6 +304,7 @@ fn run_panel(vm: &Arc<Vm>, params: &str) -> Res<i32> {
         .stdout(log.try_clone().map_err(err)?).stderr(log))?;
     wait_for(&d.join("display.sock"), 30);
     let hz = env_or("MSHIP_VM_REFRESH", "60");
+    let (displays, touch_arg) = crate::panel_args(&ds, &crate::panel(), &hz);
     let mut args: Vec<String> = vec![
         "--log-level=info".into(), "run".into(), "--name".into(), vm.name.clone(), "--disable-sandbox".into(),
         "--params".into(), params.into(),
@@ -301,9 +313,8 @@ fn run_panel(vm: &Arc<Vm>, params: &str) -> Res<i32> {
         "--vsock".into(), format!("cid={}", vm.conf["cid"].as_u64().unwrap_or(4)),
         "--socket".into(), format!("{ds}/crosvm.sock"),
         "--wayland-sock".into(), format!("{ds}/display.sock"),
-        "--gpu".into(), format!("backend=virglrenderer,context-types=virgl:virgl2:drm:cross-domain,egl=true,gles=true,\
-                                 displays=[[mode=windowed[{},{}],dpi=[420,420],refresh-rate={hz}]]", PANEL.0, PANEL.1),
-        format!("--input=multi-touch[path={ds}/touch.sock,width={},height={},name=NT36672C]", PANEL.0, PANEL.1),
+        "--gpu".into(), format!("backend=virglrenderer,context-types=virgl:virgl2:drm:cross-domain,egl=true,gles=true,{displays}"),
+        touch_arg,
         format!("--input=custom[path={ds}/keys.sock,config-path={ds}/buttons.json]"),
     ];
     args.extend(net_args(vm)?);

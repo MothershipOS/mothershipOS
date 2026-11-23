@@ -2,8 +2,9 @@
 //!
 //! - `boot-ok`: this boot came up (mship-boot-ok.service, after multi-user): the initramfs's boot counter
 //!   (/var/lib/mship-boot/attempts; after 3 unfinished boots mship-init stays in the RAM host) starts again
-//! - `boot-image <fit> [--reboot]`: write a FIT (`cargo xtask fit`) to boot_b, read it back and compare. If it then
-//!   fails to boot, the phone drops to EDL: flash a known-good FIT back (see motorola_nio/docs/boot.md).
+//! - `boot-image <image> [--reboot]`: write a boot image (`cargo xtask boot-image`) to the port's boot partition
+//!   (device.json boot.partition, e.g. the nio's boot_b), read it back and compare. If it then fails to boot, the
+//!   port's boot notes say how to recover.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -18,7 +19,7 @@ pub fn boot_ok() -> Res<()> {
     std::fs::create_dir_all(Path::new(ATTEMPTS).parent().unwrap()).map_err(|e| e.to_string())?;
     std::fs::write(ATTEMPTS, "0\n").map_err(|e| format!("{ATTEMPTS}: {e}"))?;
     if let Ok(mut k) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
-        let _ = writeln!(k, "mothership-nio: BOOT_OK");
+        let _ = writeln!(k, "mothership: BOOT_OK");
     }
     Ok(())
 }
@@ -33,14 +34,15 @@ fn partition(name: &str) -> Option<PathBuf> {
 
 pub fn boot_image(fit: &Path, reboot: bool) -> Res<()> {
     let data = std::fs::read(fit).map_err(|e| format!("{}: {e}", fit.display()))?;
-    let dev = partition("boot_b").ok_or("no boot_b partition")?;
+    let name = mship_core::device::conf()["boot"]["partition"].as_str().ok_or("device.json names no boot.partition: this port isn't installed by writing a partition")?;
+    let dev = partition(name).ok_or(format!("no {name} partition"))?;
     let size: u64 = std::fs::read_to_string(Path::new("/sys/class/block").join(dev.file_name().unwrap()).join("size"))
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .map(|sectors| sectors * 512)
-        .ok_or("boot_b: no size")?;
+        .ok_or(format!("{name}: no size"))?;
     if data.len() as u64 > size {
-        return Err(format!("{} is {} B, boot_b holds {size} B", fit.display(), data.len()));
+        return Err(format!("{} is {} B, {name} holds {size} B", fit.display(), data.len()));
     }
     let want: Vec<u8> = sha2::Sha256::digest(&data).to_vec();
     let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&dev).map_err(|e| format!("{}: {e}", dev.display()))?;

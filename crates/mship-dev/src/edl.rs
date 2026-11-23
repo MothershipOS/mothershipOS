@@ -1,18 +1,15 @@
-//! `edl`: Qualcomm EDL recovery for the nio (SM8250, 05c6:9008): Sahara loads a Firehose programmer, Firehose
-//! then reads, hashes and writes UFS sectors (4 KiB). Over raw USB (usbdevfs: the qcserial tty layer races and
-//! flushes the Sahara HELLO), or over a serial port (`--port /dev/ttyUSBn`).
+//! `edl`: Qualcomm EDL (05c6:9008): Sahara loads the phone's Firehose programmer, Firehose then reads, hashes and
+//! writes UFS sectors (4 KiB). Over raw USB (usbdevfs: the qcserial tty layer races and flushes the Sahara HELLO), or
+//! over a serial port (`--port /dev/ttyUSBn`). Which partition lives where is the port's (e.g. motorola_nio/unbrick).
 //!
-//! - `--program LUN START NUM IMG`: write an image (padded to NUM sectors), then its digest
+//! - `--program LUN START NUM IMG [--expect SHA256]`: write an image (at most NUM sectors), then its digest;
+//!   `--expect` refuses an image with another SHA-256; without `--commit` it only says what it would write
 //! - `--digest LUN START NUM`, `--read LUN START NUM OUT`
-//! - `--probe`: read only: the digests of hyp_a and hyp_b against the stock hyp, the hyp_b entry of LUN5's GPT
-//! - `--restore-hyp-b IMG [--commit]`: the stock hyp back into hyp_b (LUN5, 1184, 2048 sectors): only an image
-//!   with the stock hyp's SHA-256; without --commit only says what it would write
 //! - `--attach`: talk to an already running Firehose (no Sahara); `--reset`: power-reset at the end
 //!
-//! No bootloader partitions are touched except by an explicit --program.
+//! Nothing is written except by an explicit --program --commit.
 
 use std::os::fd::AsRawFd;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -23,8 +20,6 @@ use crate::serial::Serial;
 const VID: &str = "05c6";
 const PID: &str = "9008";
 const SECTOR: usize = 4096;
-/// the stock hyp image (hyp_a / hyp_b)
-const STOCK_HYP: &str = "f69538bf3fded342bb1679c3d01f0b2ad4ba930b235c11fda210efcf0240d8b2";
 
 const HELLO: u32 = 1;
 const HELLO_RESP: u32 = 2;
@@ -34,6 +29,11 @@ const DONE: u32 = 5;
 const DONE_RESP: u32 = 6;
 const RESET: u32 = 7;
 const READ_DATA64: u32 = 0x12;
+const CMD_READY: u32 = 0x0b;
+const CMD_EXEC: u32 = 0x0d;
+const CMD_EXEC_RESP: u32 = 0x0e;
+const CMD_EXEC_DATA: u32 = 0x0f;
+const MODE_COMMAND: u32 = 3;
 
 fn log(m: &str) {
     eprintln!("{m}");
@@ -190,7 +190,8 @@ fn words(v: &[u32]) -> Vec<u8> {
     v.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
-fn sahara_load(l: &mut dyn Link, loader: &[u8]) -> Result<()> {
+/// The device's HELLO: the one-shot one, else after a RESET.
+fn hello(l: &mut dyn Link) -> Result<Vec<u8>> {
     // the one-shot HELLO: read it patiently; RESET (the device sends it again) only as a last resort
     let mut hello = None;
     let t = Instant::now();
@@ -216,7 +217,11 @@ fn sahara_load(l: &mut dyn Link, loader: &[u8]) -> Result<()> {
             }
         }
     }
-    let h = hello.context("no Sahara HELLO (replug the phone)")?;
+    hello.context("no Sahara HELLO (replug the phone)")
+}
+
+fn sahara_load(l: &mut dyn Link, loader: &[u8]) -> Result<()> {
+    let h = hello(l)?;
     let (version, compat, maxlen, mode) = (le32(&h, 8), le32(&h, 12), le32(&h, 16), le32(&h, 20));
     log(&format!("HELLO v={version} maxlen={maxlen:#x} mode={mode}"));
     l.write(&words(&[HELLO_RESP, 48, version, compat, 0, mode, 0, 0, 0, 0, 0, 0]))?;
@@ -259,6 +264,46 @@ fn sahara_load(l: &mut dyn Link, loader: &[u8]) -> Result<()> {
             other => bail!("Sahara command {other:#x}"),
         }
     }
+}
+
+/// Sahara command mode: what the boot ROM tells before any programmer runs (read only). Ends with a RESET: the
+/// phone leaves EDL and boots normally.
+pub fn info(port: Option<&str>) -> Result<i32> {
+    let mut link: Box<dyn Link> = match port {
+        Some(p) => Box::new(Serial::open(p, libc::B115200, Duration::from_millis(500))?),
+        None => Box::new(Usb::open()?),
+    };
+    let l = link.as_mut();
+    let h = hello(l)?;
+    let (version, compat) = (le32(&h, 8), le32(&h, 12));
+    log(&format!("HELLO v={version} mode={}", le32(&h, 20)));
+    l.write(&words(&[HELLO_RESP, 48, version, compat, 0, MODE_COMMAND, 0, 0, 0, 0, 0, 0]))?;
+    match packet(l, Duration::from_secs(5))? {
+        Some((CMD_READY, _)) => {}
+        other => bail!("no command mode (got {:?})", other.map(|(c, _)| c)),
+    }
+    for (id, what) in [(1u32, "serial"), (2, "msm hw id"), (3, "oem pk hash"), (7, "sbl sw version")] {
+        l.write(&words(&[CMD_EXEC, 12, id]))?;
+        let Some((CMD_EXEC_RESP, p)) = packet(l, Duration::from_secs(3))? else {
+            println!("{what}: not answered");
+            continue;
+        };
+        let n = le32(&p, 12) as usize;
+        l.write(&words(&[CMD_EXEC_DATA, 12, id]))?;
+        let (mut d, t) = (Vec::new(), Instant::now());
+        while d.len() < n && t.elapsed() < Duration::from_secs(3) {
+            d.extend(l.read(n - d.len(), Duration::from_secs(1))?);
+        }
+        let hex: String = d.iter().map(|b| format!("{b:02x}")).collect();
+        println!("{what}: {hex}");
+        if id == 3 {
+            let zero = !d.is_empty() && d.iter().all(|&b| b == 0);
+            println!("  secure boot: {}", if zero { "NOT enforced (no OEM key fused)" } else { "enforced (an OEM key is fused)" });
+        }
+    }
+    let _ = l.write(&words(&[RESET, 8]));
+    println!("reset sent (the phone leaves EDL)");
+    Ok(0)
 }
 
 // ---------------------------------------------------------------- Firehose
@@ -363,23 +408,6 @@ fn sha256_hex(d: &[u8]) -> String {
     sha2::Sha256::digest(d).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// hyp_b's entry in LUN5's GPT (sector 2 on)
-fn check_hyp_b(fh: &mut Firehose) -> Result<()> {
-    let gpt = fh.read(5, 0, 6)?;
-    for e in gpt[2 * SECTOR..].chunks(128).take(40) {
-        if e.len() < 128 || e[..16].iter().all(|b| *b == 0) {
-            continue;
-        }
-        let name: Vec<u16> = e[56..128].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|u| *u != 0).collect();
-        if String::from_utf16_lossy(&name) == "hyp_b" {
-            let (first, last) = (le64(e, 32), le64(e, 40));
-            println!("LUN5 GPT: hyp_b LBA {first}-{last} ({} B) {}", (last - first + 1) as usize * SECTOR, if first == 1184 && last == 3231 { "MATCH" } else { "MISMATCH" });
-            return Ok(());
-        }
-    }
-    println!("hyp_b not found in LUN5's GPT");
-    Ok(())
-}
 
 pub struct Args {
     pub loader: Option<String>,
@@ -388,8 +416,7 @@ pub struct Args {
     pub program: Option<(u32, u64, u64, String)>,
     pub digest: Option<(u32, u64, u64)>,
     pub read: Option<(u32, u64, u64, String)>,
-    pub probe: bool,
-    pub restore_hyp_b: Option<String>,
+    pub expect: Option<String>,
     pub commit: bool,
     pub reset: bool,
 }
@@ -408,9 +435,19 @@ pub fn main(a: Args) -> Result<i32> {
     println!("configure ACK: {} (nop: {})", fh.configure()?.contains("ACK"), nop.contains("ACK"));
     if let Some((lun, start, num, img)) = &a.program {
         let data = std::fs::read(img)?;
-        let res = fh.program(*lun, *start, *num, &data)?;
-        println!("{}", res.chars().rev().take(120).collect::<Vec<_>>().into_iter().rev().collect::<String>());
-        println!("digest: {}", fh.digest(*lun, *start, *num)?);
+        let sum = sha256_hex(&data);
+        println!("{img}: {} B sha256 {sum}", data.len());
+        ensure!(data.len() as u64 <= num * SECTOR as u64, "the image is larger than {num} sectors: refusing");
+        if let Some(want) = &a.expect {
+            ensure!(sum == want.to_lowercase(), "the image's SHA-256 is not the expected {want}: refusing");
+        }
+        if !a.commit {
+            println!("dry run: would program LUN{lun} start {start}, {num} sectors; --commit writes");
+        } else {
+            let res = fh.program(*lun, *start, *num, &data)?;
+            println!("{}", res.chars().rev().take(120).collect::<Vec<_>>().into_iter().rev().collect::<String>());
+            println!("digest: {}", fh.digest(*lun, *start, *num)?);
+        }
     }
     if let Some((lun, start, num)) = a.digest {
         println!("digest: {}", fh.digest(lun, start, num)?);
@@ -418,29 +455,6 @@ pub fn main(a: Args) -> Result<i32> {
     if let Some((lun, start, num, out)) = &a.read {
         std::fs::write(out, fh.read(*lun, *start, *num)?)?;
         println!("{out}: {} sectors", num);
-    }
-    if a.probe {
-        for (name, lun) in [("hyp_a", 3), ("hyp_b", 5)] {
-            let d = fh.digest(lun, 1184, 2048)?;
-            println!("{name} (LUN{lun} 1184+2048): {d} {}", if d == STOCK_HYP { "== stock" } else { "!= stock" });
-        }
-        check_hyp_b(&mut fh)?;
-        println!("probe done (read only)");
-    }
-    if let Some(img) = &a.restore_hyp_b {
-        let data = std::fs::read(Path::new(img))?;
-        let sum = sha256_hex(&data);
-        println!("{img}: {} B sha256 {sum} {}", data.len(), if sum == STOCK_HYP { "(stock)" } else { "(NOT stock)" });
-        ensure!(data.len() == 2048 * SECTOR, "the image is not 8 MiB: refusing");
-        ensure!(sum == STOCK_HYP, "the image is not the stock hyp: refusing");
-        if !a.commit {
-            println!("dry run: would program LUN5 start 1184, 2048 sectors with it; --commit writes");
-        } else {
-            println!(">>> programming hyp_b (LUN5 1184+2048)");
-            println!("{}", fh.program(5, 1184, 2048, &data)?.chars().rev().take(600).collect::<Vec<_>>().into_iter().rev().collect::<String>());
-            let d = fh.digest(5, 1184, 2048)?;
-            println!("after the write: {d} {}", if d == STOCK_HYP { "== stock" } else { "!= stock" });
-        }
     }
     if a.reset {
         fh.reset();

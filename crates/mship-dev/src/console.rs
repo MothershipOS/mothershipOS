@@ -39,7 +39,7 @@ pub fn wait_port(timeout: Duration) -> Result<String> {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    bail!("nio diagnostic gadget {}:{} not found within {}s", GADGET.0, GADGET.1, timeout.as_secs())
+    bail!("the diagnostic gadget {}:{} not found within {}s", GADGET.0, GADGET.1, timeout.as_secs())
 }
 
 pub struct Shell(Serial);

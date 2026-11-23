@@ -339,6 +339,7 @@ impl Gpu {
     }
 
     /// One plane of a dma-buf as a texture (and a framebuffer when it is a target).
+    #[allow(clippy::too_many_arguments)]
     unsafe fn plane(&self, fd: RawFd, drm: u32, w: u32, h: u32, offset: u32, pitch: u32, target: bool) -> Option<Plane> {
         let gl = &self.gl;
         unsafe {
@@ -488,7 +489,7 @@ impl Gpu {
             (gl.glDrawArrays)(GL_TRIANGLES, 0, 3);
             (gl.glReadPixels)(0, 0, FOCUS_W as i32, FOCUS_H as i32, GL_RGBA, GL_UNSIGNED_BYTE, px.as_mut_ptr().cast());
         }
-        let (steps, light) = px.chunks_exact(4).fold((0u64, 0u64), |(s, l), p| (s + p[0] as u64, l + p[1] as u64));
+        let (steps, light) = px.as_chunks::<4>().0.iter().fold((0u64, 0u64), |(s, l), p| (s + p[0] as u64, l + p[1] as u64));
         let n = (FOCUS_W * FOCUS_H) as f64;
         let mean = light as f64 / n;
         Some((if mean < 1.0 { 0.0 } else { steps as f64 / n / mean }, mean))

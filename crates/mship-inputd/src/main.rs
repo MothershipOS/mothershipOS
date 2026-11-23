@@ -2,14 +2,15 @@
 //!
 //! `mship-inputd <vm dir> <touch evdev> <key evdev>[,<key evdev>...] [<power key evdev>]`
 //!
-//! On the nio, volume up and the assist key are gpio-keys, volume down is the PMIC's pm8941_resin. The key devices
-//! are never grabbed (gpio-keys also carries the assist key, and grabbing/releasing it re-announces key state to
-//! sway, which retriggered the assist binding in a loop): volume keys are read and, while the buttons are lent,
-//! forwarded; sway leaves volume keys unbound, so the host does nothing with them.
+//! The devices come from mship_core::device (the launcher passes them): the volume keys' devices, which may carry
+//! other buttons too (e.g. the nio's gpio-keys has volume up and the assist key, volume down is the PMIC's resin).
+//! The key devices are never grabbed (grabbing/releasing re-announces key state to sway, which retriggered the home
+//! key's binding in a loop): volume keys are read and, while the buttons are lent, forwarded; sway leaves volume
+//! keys unbound, so the host does nothing with them.
 //!
 //! crosvm connects to <vm dir>/touch.sock (`--input multi-touch[path=...]`) and <vm dir>/keys.sock
 //! (`--input keyboard[path=...]`); events go out as virtio_input_event (le16 type, le16 code, le32 value). The
-//! power key (pm8941_pwrkey, a device of its own) belongs to the display: while the VM has the display it is grabbed
+//! power key (a device of its own) belongs to the display: while the VM has the display it is grabbed
 //! and forwarded, so Android sleeps/wakes itself (its screen state then switches the panel); lending the display
 //! also sends KEY_WAKEUP so the VM is awake when it is shown. The touchscreen's wake gesture device (a double tap
 //! while the panel is off reports KEY_WAKEUP: the touch driver's gesture mode) goes with the power key.
@@ -31,9 +32,8 @@ use std::io::Write;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use mship_core::api::Op;
 
 /// _IOW('E', 0x90, int)
 const EVIOCGRAB: libc::c_ulong = 0x40044590;
