@@ -16,7 +16,7 @@
 //! and applied at its hello. One band per VM at a time (two station interfaces with the same MAC are not allowed
 //! by mac80211).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixDatagram;
@@ -152,6 +152,10 @@ fn parse_channels(text: &str) -> BTreeMap<String, Vec<u32>> {
     out
 }
 
+fn conf_bands_ifaces(c: &Conf) -> Vec<String> {
+    c.bands.values().filter(|i| ifindex(i) != 0).cloned().collect()
+}
+
 fn ifindex(name: &str) -> u32 {
     std::ffi::CString::new(name).map(|c| unsafe { libc::if_nametoindex(c.as_ptr()) }).unwrap_or(0)
 }
@@ -200,6 +204,8 @@ struct VmConf {
 
 struct Conf {
     phy: String,
+    /// the host's own station interface (NetworkManager's)
+    host_iface: String,
     /// band -> its interface
     bands: BTreeMap<String, String>,
 }
@@ -213,7 +219,6 @@ fn vm_conf(cid: u32) -> Option<VmConf> {
 
 fn conf() -> Conf {
     let mut c = json!({
-        "phy": "phy0",
         "bands": {"2g": {"iface": "mshw2g"}, "5g": {"iface": "mshw5g"}},
     });
     if let Some(Value::Object(o)) = std::fs::read_to_string(CONF).ok().and_then(|s| serde_json::from_str(&s).ok()) {
@@ -221,8 +226,14 @@ fn conf() -> Conf {
             c[k] = v;
         }
     }
+    // the host's station and its radio: found (mship_core::device), unless wifi-bridge.json names them
+    let host_iface = c["host_iface"].as_str().map(String::from).or_else(mship_core::device::wifi_iface).unwrap_or_else(|| "wlan0".into());
+    let phy = c["phy"].as_str().map(String::from)
+        .or_else(|| std::fs::read_to_string(format!("/sys/class/net/{host_iface}/phy80211/name")).ok().map(|n| n.trim().to_string()))
+        .unwrap_or_else(|| "phy0".into());
     Conf {
-        phy: c["phy"].as_str().unwrap_or("phy0").into(),
+        phy,
+        host_iface,
         bands: c["bands"].as_object().into_iter().flatten().filter_map(|(b, v)| Some((b.clone(), v["iface"].as_str()?.to_string()))).collect(),
     }
 }
@@ -232,8 +243,18 @@ struct Session {
     w: vsock::VsockStream,
     vm: VmConf,
     mac: String,
-    band: Option<String>,
+    /// the bands lent to this VM, all on one interface (`iface`: the first band's); the guest sees their channels
+    bands: BTreeSet<String>,
+    iface: Option<String>,
     ifidx: u32,
+    /// the frequency of the connection being made or held (0: none)
+    freq: u32,
+    /// the BSS of the connection being made
+    target: Option<String>,
+    /// the connection being made, for a retry on another BSS: SSID and the CONNECT attributes without BSSID/frequency
+    pending: Option<(Vec<u8>, Vec<u8>)>,
+    /// BSSes whose connect timed out (bssid -> when): out of reach of the phone's radio, whatever the scan says
+    unreachable: BTreeMap<String, Instant>,
     scan_id: u32,
     scan_started: Instant,
     connected: bool,
@@ -258,9 +279,24 @@ impl Session {
 struct State {
     sessions: BTreeMap<u32, Session>,
     /// cid -> band mothershipd lent (applied whenever the VM's driver is connected)
-    desired: BTreeMap<u32, String>,
+    desired: BTreeMap<u32, BTreeSet<String>>,
     serial: u64,
+    /// the phone is suspending (`sleep` .. `resume`): no band is attached, lends are only recorded
+    asleep: bool,
 }
+
+/// The host's Wi-Fi held off while VMs use Wi-Fi. The QCA6390 firmware crashes when it adds a second station's peer:
+/// on the AP a VM is on (seen whenever the host joined, rejoined or roamed onto it) and on another AP of the network
+/// (the host locked to another AP crashed it the same way, 2026-11-23). So the host's station stays disconnected
+/// (`nmcli device disconnect`: also no autoconnect) from a VM's first connect until no VM has been connected or
+/// connecting for HOST_RELEASE; freeing it at each disconnect or timeout let it rejoin while the VM was retrying.
+#[derive(Default)]
+struct HostPin {
+    held: bool,
+    idle_since: Option<Instant>,
+}
+
+const HOST_RELEASE: Duration = Duration::from_secs(60);
 
 struct Bridge {
     conf: Conf,
@@ -268,6 +304,8 @@ struct Bridge {
     channels: BTreeMap<String, Vec<u32>>,
     mfp_optional: bool,
     st: Mutex<State>,
+    /// the host's NetworkManager connection kept off the access points VMs use
+    host_pin: Mutex<HostPin>,
 }
 
 impl Bridge {
@@ -277,6 +315,14 @@ impl Bridge {
 
     fn band_channels(&self, band: Option<&str>) -> Vec<u32> {
         band.and_then(|b| self.channels.get(b)).cloned().unwrap_or_default()
+    }
+
+    /// The channels of every band the session holds.
+    fn session_channels(&self, s: &Session) -> Vec<u32> {
+        let mut ch: Vec<u32> = s.bands.iter().flat_map(|b| self.band_channels(Some(b))).collect();
+        ch.sort();
+        ch.dedup();
+        ch
     }
 
     fn nl(&self, cmd: u8, attrs: &[u8]) -> Res<Vec<Attrs>> {
@@ -289,39 +335,67 @@ impl Bridge {
 
     // ------------------------------------------------ attach / release
     fn attach(&self, st: &mut State, cid: u32, band: &str) {
-        if st.sessions.get(&cid).is_none_or(|s| s.band.as_deref() == Some(band)) {
+        if st.sessions.get(&cid).is_none_or(|s| s.bands.contains(band)) {
             return;
         }
-        if st.sessions[&cid].band.is_some() {
-            self.detach(st, cid, "user");
-        }
-        let Some(iface) = self.conf.bands.get(band).cloned() else { return };
-        let owner = st.sessions.iter().find(|(c, s)| **c != cid && s.band.as_deref() == Some(band)).map(|(c, _)| *c);
+        let Some(band_iface) = self.conf.bands.get(band).cloned() else { return };
+        let owner = st.sessions.iter().find(|(c, s)| **c != cid && s.bands.contains(band)).map(|(c, _)| *c);
         if let Some(o) = owner {
-            self.detach(st, o, "revoked");
+            self.detach_band(st, o, band, "revoked");
         }
         let s = st.sessions.get_mut(&cid).unwrap();
-        let prepared = band_iface_prepare(&self.conf.phy, &iface, &s.mac)
-            .map_err(|e| e.1)
-            .and_then(|idx| redirect(&iface, &s.vm.tap, true).and_then(|_| redirect(&s.vm.tap, &iface, true)).map(|_| idx))
-            // the VM's card has carrier while a band is attached (it is blank otherwise: mship_core::vmnet)
-            .and_then(|idx| run("ip", &["link", "set", &s.vm.tap, "up"]).map(|_| idx));
-        match prepared {
-            Ok(idx) => {
-                s.ifidx = idx;
-                s.band = Some(band.into());
-                log(format!("cid {cid}: attached {band} ({iface} <-> {}, {})", s.vm.tap, s.mac));
-                let ch = self.band_channels(Some(band));
-                s.send(mw::ATTACHED, 0, &a_u32s(mw::A_ATTACHED_CHANNELS, &ch));
+        if s.iface.is_none() {
+            // the VM's first band: its interface, joined to the VM's card
+            let prepared = band_iface_prepare(&self.conf.phy, &band_iface, &s.mac)
+                .map_err(|e| e.1)
+                .and_then(|idx| redirect(&band_iface, &s.vm.tap, true).and_then(|_| redirect(&s.vm.tap, &band_iface, true)).map(|_| idx))
+                // the VM's card has carrier while a band is attached (it is blank otherwise: mship_core::vmnet)
+                .and_then(|idx| run("ip", &["link", "set", &s.vm.tap, "up"]).map(|_| idx));
+            match prepared {
+                Ok(idx) => {
+                    s.ifidx = idx;
+                    s.iface = Some(band_iface.clone());
+                }
+                Err(e) => return log(format!("cid {cid}: attach {band}: {e}")),
             }
-            Err(e) => log(format!("cid {cid}: attach {band}: {e}")),
         }
+        // a further band rides on the same interface (the firmware allows two stations: the host's and one more)
+        s.bands.insert(band.into());
+        let ch = self.session_channels(s);
+        let s = st.sessions.get_mut(&cid).unwrap();
+        log(format!("cid {cid}: attached {band} ({} <-> {}, {}; bands {:?})", s.iface.as_deref().unwrap_or("?"), s.vm.tap, s.mac, s.bands));
+        s.send(mw::ATTACHED, 0, &a_u32s(mw::A_ATTACHED_CHANNELS, &ch));
+    }
+
+    /// One band taken from a VM: the others stay (fewer channels); the last one takes the interface with it.
+    fn detach_band(&self, st: &mut State, cid: u32, band: &str, reason: &str) {
+        let Some(s) = st.sessions.get_mut(&cid) else { return };
+        if !s.bands.contains(band) {
+            return;
+        }
+        if s.bands.len() == 1 {
+            return self.detach(st, cid, reason);
+        }
+        s.bands.remove(band);
+        let ch = self.session_channels(s);
+        let s = st.sessions.get_mut(&cid).unwrap();
+        // a connection on the band taken ends
+        let on_band = self.band_channels(Some(band)).contains(&s.freq);
+        if (s.connected || s.connecting) && on_band {
+            let _ = self.nl(n::CMD_DISCONNECT, &[nla_u32(n::ATTR_IFINDEX, s.ifidx), nla_u16(n::ATTR_REASON_CODE, 3)].concat());
+            s.send(mw::DISCONNECTED, 0, &[a_u16(mw::A_REASON, 3), a_u8(mw::A_LOCALLY_GENERATED, 1)].concat());
+            s.connected = false;
+            s.connecting = false;
+        }
+        s.cache.retain(|_, (f, _, _)| ch.contains(f));
+        s.send(mw::ATTACHED, 0, &a_u32s(mw::A_ATTACHED_CHANNELS, &ch));
+        log(format!("cid {cid}: released {band} ({reason}); bands {:?}", s.bands));
     }
 
     fn detach(&self, st: &mut State, cid: u32, reason: &str) {
         let Some(s) = st.sessions.get_mut(&cid) else { return };
-        let Some(band) = s.band.clone() else { return };
-        let iface = self.conf.bands[&band].clone();
+        let Some(iface) = s.iface.clone() else { return };
+        let bands = s.bands.clone();
         // deauth + keys are dropped by the disconnect; scan results go stale with the band
         let _ = self.nl(n::CMD_DISCONNECT, &[nla_u32(n::ATTR_IFINDEX, s.ifidx), nla_u16(n::ATTR_REASON_CODE, 3)].concat());
         let _ = redirect(&iface, &s.vm.tap, false);
@@ -338,8 +412,9 @@ impl Bridge {
             s.scan_id = 0;
         }
         s.send(mw::DETACHED, 0, &a_u32(mw::A_DETACH_REASON, mw::detach_reason(reason)));
-        log(format!("cid {cid}: released {band} ({reason})"));
-        s.band = None;
+        log(format!("cid {cid}: released {bands:?} ({reason})"));
+        s.bands.clear();
+        s.iface = None;
         s.ifidx = 0;
         s.cache.clear();
     }
@@ -437,7 +512,7 @@ impl Bridge {
     }
 
     fn need_band(&self, s: &Session) -> Res<u32> {
-        if s.band.is_none() {
+        if s.iface.is_none() {
             return Err((libc::ENETDOWN, "band not attached".into()));
         }
         Ok(s.ifidx)
@@ -456,21 +531,21 @@ impl Bridge {
         let mut all: Vec<u32> = self.channels.values().flatten().copied().collect();
         all.sort();
         all.dedup();
-        let attached = self.band_channels(s.band.as_deref());
+        let attached = self.session_channels(s);
         s.send(mw::HELLO_REPLY, id, &[attr(mw::A_VERSION, mw::VERSION.as_bytes()), a_u32s(mw::A_CHANNELS, &all), a_u32s(mw::A_ATTACHED_CHANNELS, &attached)].concat());
         log(format!("cid {cid}: hello {ver}, mac {}", s.mac));
-        if let Some(band) = st.desired.get(&cid).cloned()
-            && st.sessions[&cid].band.is_none()
-        {
-            // lent before the VM's driver connected
-            self.attach(st, cid, &band);
+        // lent before the VM's driver connected (applied at resume while the phone suspends)
+        if !st.asleep {
+            for band in st.desired.get(&cid).cloned().unwrap_or_default() {
+                self.attach(st, cid, &band);
+            }
         }
     }
 
     fn r_scan(&self, st: &mut State, cid: u32, a: &Attrs) -> Res<()> {
         let s = st.sessions.get_mut(&cid).unwrap();
         let idx = self.need_band(s)?;
-        let allowed = self.band_channels(s.band.as_deref());
+        let allowed = self.session_channels(s);
         let mut freqs: Vec<u32> = get_u32s(a, mw::A_FREQS).into_iter().filter(|f| allowed.contains(f)).collect();
         if freqs.is_empty() {
             freqs = allowed;
@@ -503,10 +578,62 @@ impl Bridge {
         }
     }
 
+    /// The host's access point (BSSID) now, if it is associated.
+    fn host_bssid(&self) -> Option<String> {
+        let out = Command::new("iw").args(["dev", &self.conf.host_iface, "link"]).output().ok()?;
+        String::from_utf8_lossy(&out.stdout).lines().find_map(|l| l.strip_prefix("Connected to ")).and_then(|r| r.split_whitespace().next()).map(str::to_lowercase)
+    }
+
+    /// A VM joins an AP (or uses Wi-Fi while the host came back): the host's station disconnects, and stays so.
+    fn host_leave(&self, _bssid: &[u8], _freq: u32) -> Res<()> {
+        let mut pin = self.host_pin.lock().unwrap();
+        pin.idle_since = None;
+        if !pin.held {
+            log("a VM uses Wi-Fi: the host's station is held disconnected");
+            pin.held = true;
+        }
+        // also while it is only activating (no BSSID yet): the device-level disconnect stops that and autoconnect
+        let _ = Command::new("nmcli").args(["device", "disconnect", &self.conf.host_iface]).output();
+        if let Some(b) = self.host_bssid() {
+            return Err((libc::EBUSY, format!("the host is still on {b}")));
+        }
+        Ok(())
+    }
+
+    /// Every 2 s: the host disconnected again if it got associated anyway while VMs use Wi-Fi, and released once no
+    /// VM has used Wi-Fi for HOST_RELEASE.
+    fn host_guard(&self) {
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            let in_use = {
+                let st = self.lock();
+                st.sessions.values().any(|s| s.connected || s.connecting)
+            };
+            if !in_use {
+                let mut pin = self.host_pin.lock().unwrap();
+                if !pin.held || pin.idle_since.get_or_insert_with(Instant::now).elapsed() < HOST_RELEASE {
+                    continue;
+                }
+                *pin = HostPin::default();
+                drop(pin);
+                log("no VM on Wi-Fi: the host's station is free again");
+                let _ = Command::new("timeout").args(["20", "nmcli", "device", "connect", &self.conf.host_iface]).output();
+                continue;
+            }
+            let held = self.host_pin.lock().unwrap().held;
+            if !held || self.host_bssid().is_some() {
+                if let Some(h) = self.host_bssid() {
+                    log(format!("the host got onto {h} while a VM uses Wi-Fi"));
+                }
+                let _ = self.host_leave(&[], 0);
+            }
+        }
+    }
+
     fn r_connect(&self, st: &mut State, cid: u32, a: &Attrs) -> Res<()> {
         let s = st.sessions.get_mut(&cid).unwrap();
         let idx = self.need_band(s)?;
-        let allowed = self.band_channels(s.band.as_deref());
+        let allowed = self.session_channels(s);
         let ssid = a.get(&mw::A_SSID).cloned().unwrap_or_default();
         let mut bssid = a.get(&mw::A_BSSID).or(a.get(&mw::A_BSSID_HINT)).cloned();
         let mut freq = get_u32(a, mw::A_FREQ).filter(|f| *f != 0).or(get_u32(a, mw::A_FREQ_HINT)).unwrap_or(0);
@@ -523,16 +650,24 @@ impl Bridge {
                 freq = f;
             }
         }
+        // a BSS that timed out recently: the strongest other one of this SSID instead. The guest would report the
+        // timeout as an association rejection, which Android counts against the whole network and soon disables it.
+        s.unreachable.retain(|_, t| t.elapsed() < Duration::from_secs(300));
+        if let Some(b) = bssid.as_deref().map(mac_str)
+            && s.unreachable.contains_key(&b)
+            && let Some((_, nb, nf)) = s.cache.iter()
+                .filter(|(c, (f, cs, _))| *cs == ssid && allowed.contains(f) && !s.unreachable.contains_key(*c))
+                .map(|(c, (f, _, sig))| (*sig, c.clone(), *f))
+                .max()
+        {
+            log(format!("cid {cid}: {b} timed out recently, connecting to {nb} ({nf} MHz) instead"));
+            bssid = Some(mac_bytes(&nb));
+            freq = nf;
+        }
         if freq != 0 && !allowed.contains(&freq) {
             return Err((libc::EINVAL, format!("{freq} MHz is not in the attached band")));
         }
         let mut at = [nla_u32(n::ATTR_IFINDEX, idx), nla(n::ATTR_SSID, &ssid)].concat();
-        if let Some(b) = &bssid {
-            at.extend(nla(n::ATTR_MAC, b));
-        }
-        if freq != 0 {
-            at.extend(nla_u32(n::ATTR_WIPHY_FREQ, freq));
-        }
         if let Some(ies) = a.get(&mw::A_IES).filter(|i| !i.is_empty()) {
             at.extend(nla(n::ATTR_IE, ies));
         }
@@ -567,8 +702,22 @@ impl Bridge {
         if mfp != 0 {
             at.extend(nla_u32(n::ATTR_USE_MFP, mfp));
         }
+        let base = at.clone();
+        if let Some(b) = &bssid {
+            at.extend(nla(n::ATTR_MAC, b));
+        }
+        if freq != 0 {
+            at.extend(nla_u32(n::ATTR_WIPHY_FREQ, freq));
+        }
+        if let Some(b) = &bssid {
+            self.host_leave(b, freq)?;
+        }
+        let s = st.sessions.get_mut(&cid).unwrap();
         s.connecting = true;
         s.connected = false;
+        s.freq = freq;
+        s.target = bssid.as_deref().map(mac_str);
+        s.pending = Some((ssid.clone(), base));
         self.nl(n::CMD_CONNECT, &at)?;
         log(format!("cid {cid}: connect {:?} {} {} MHz auth {auth} wpa {wpa} mfp {mfp}", String::from_utf8_lossy(&ssid),
                     bssid.as_deref().map_or("?".into(), mac_str), if freq != 0 { freq.to_string() } else { "?".into() }));
@@ -585,9 +734,9 @@ impl Bridge {
             return Err((libc::EBUSY, "connected".into()));
         }
         s.mac = mac_str(&m);
-        if let Some(band) = s.band.clone() {
+        if let Some(iface) = s.iface.clone() {
             // re-prepare the interface with the new address
-            s.ifidx = band_iface_prepare(&self.conf.phy, &self.conf.bands[&band], &s.mac)?;
+            s.ifidx = band_iface_prepare(&self.conf.phy, &iface, &s.mac)?;
         }
         Ok(())
     }
@@ -635,7 +784,7 @@ impl Bridge {
         if s.scan_id == 0 {
             return;
         }
-        let allowed = self.band_channels(s.band.as_deref());
+        let allowed = self.session_channels(s);
         let mut count = 0;
         if !aborted {
             s.cache.clear();
@@ -661,7 +810,7 @@ impl Bridge {
             }
         }
         s.send(mw::SCAN_DONE, 0, &a_u8(mw::A_ABORTED, aborted as u8));
-        log(format!("cid {cid}: scan {}, {count} BSS in {}", if aborted { "aborted" } else { "done" }, s.band.as_deref().unwrap_or("-")));
+        log(format!("cid {cid}: scan {}, {count} BSS in {}", if aborted { "aborted" } else { "done" }, s.bands.iter().cloned().collect::<Vec<_>>().join("+")));
         s.scan_id = 0;
     }
 
@@ -691,9 +840,43 @@ impl Bridge {
         vec![]
     }
 
+    /// The connect timed out (the BSS does not answer): the same connection to the strongest other BSS of the SSID
+    /// in the VM's bands that has not timed out. The guest sees only the final result: it would report a timeout as
+    /// an association rejection, which Android counts against the whole network and then disables it.
+    fn retry_elsewhere(&self, st: &mut State, cid: u32) -> bool {
+        let s = st.sessions.get_mut(&cid).unwrap();
+        if let Some(b) = s.target.clone() {
+            s.unreachable.insert(b, Instant::now());
+        }
+        let Some((ssid, base)) = s.pending.clone() else { return false };
+        let allowed = self.session_channels(s);
+        let s = st.sessions.get_mut(&cid).unwrap();
+        let Some((_, nb, nf)) = s.cache.iter()
+            .filter(|(c, (f, cs, _))| *cs == ssid && allowed.contains(f) && !s.unreachable.contains_key(*c))
+            .map(|(c, (f, _, sig))| (*sig, c.clone(), *f))
+            .max()
+        else {
+            return false;
+        };
+        log(format!("cid {cid}: {} does not answer, trying {nb} ({nf} MHz)", s.target.as_deref().unwrap_or("?")));
+        let b = mac_bytes(&nb);
+        if self.host_leave(&b, nf).is_err() {
+            return false;
+        }
+        let s = st.sessions.get_mut(&cid).unwrap();
+        s.target = Some(nb);
+        s.freq = nf;
+        let at = [base, nla(n::ATTR_MAC, &b), nla_u32(n::ATTR_WIPHY_FREQ, nf)].concat();
+        self.nl(n::CMD_CONNECT, &at).is_ok()
+    }
+
     fn on_connect(&self, st: &mut State, cid: u32, a: &Attrs) {
         let status = get_u16(a, n::ATTR_STATUS_CODE).unwrap_or(1);
         let timed_out = a.contains_key(&n::ATTR_TIMED_OUT);
+        if timed_out && st.sessions[&cid].connecting && self.retry_elsewhere(st, cid) {
+            log(format!("cid {cid}: connect result {status} (timeout), retrying"));
+            return;
+        }
         let ifidx = st.sessions[&cid].ifidx;
         let mut extra = a_s32(mw::A_STATUS, status as i32);
         if let Some(b) = a.get(&n::ATTR_MAC) {
@@ -711,6 +894,7 @@ impl Bridge {
         let s = st.sessions.get_mut(&cid).unwrap();
         s.connecting = false;
         s.connected = status == 0 && !timed_out;
+        s.pending = None;
         s.send(mw::CONNECT_RESULT, 0, &extra);
         log(format!("cid {cid}: connect result {status}{}", if timed_out { " (timeout)" } else { "" }));
     }
@@ -777,28 +961,72 @@ impl Bridge {
         match w.as_slice() {
             ["attach", cid, band, ..] if self.conf.bands.contains_key(*band) && cid.parse::<u32>().is_ok() => {
                 let cid: u32 = cid.parse().unwrap();
-                let others: Vec<u32> = st.desired.iter().filter(|(c, b)| b.as_str() == *band && **c != cid).map(|(c, _)| *c).collect();
+                let others: Vec<u32> = st.desired.iter().filter(|(c, b)| b.contains(*band) && **c != cid).map(|(c, _)| *c).collect();
                 for o in others {
                     // one owner per band
-                    st.desired.remove(&o);
-                    self.detach(&mut st, o, "revoked");
+                    if let Some(b) = st.desired.get_mut(&o) {
+                        b.remove(*band);
+                    }
+                    self.detach_band(&mut st, o, band, "revoked");
                 }
-                st.desired.insert(cid, band.to_string());
-                self.attach(&mut st, cid, band);
+                st.desired.entry(cid).or_default().insert(band.to_string());
+                if !st.asleep {
+                    self.attach(&mut st, cid, band);
+                }
                 "ok".into()
             }
             ["detach", cid, rest @ ..] if cid.parse::<u32>().is_ok() => {
                 let cid: u32 = cid.parse().unwrap();
-                st.desired.remove(&cid);
-                self.detach(&mut st, cid, rest.first().copied().unwrap_or("user"));
+                let reason = rest.first().copied().unwrap_or("user");
+                // `detach <cid> <reason> <band>`: that band; without one, all of them
+                match rest.get(1).filter(|b| self.conf.bands.contains_key(**b)) {
+                    Some(band) => {
+                        if let Some(b) = st.desired.get_mut(&cid) {
+                            b.remove(*band);
+                        }
+                        self.detach_band(&mut st, cid, band, reason);
+                    }
+                    None => {
+                        st.desired.remove(&cid);
+                        self.detach(&mut st, cid, reason);
+                    }
+                }
+                "ok".into()
+            }
+            // the phone suspends (systemd sleep hook): no traffic may be queued on the wiphy (ath11k cannot flush a
+            // band interface's frames and its suspend fails, then its resume times out); the VMs see their band
+            // detached as for a blanked screen, and get it back on resume (their supplicant reconnects)
+            ["sleep", ..] => {
+                st.asleep = true;
+                let cids: Vec<u32> = st.sessions.iter().filter(|(_, s)| s.iface.is_some()).map(|(c, _)| *c).collect();
+                for cid in &cids {
+                    self.detach(&mut st, *cid, "screen");
+                }
+                log(format!("sleep: released the bands of {cids:?}"));
+                "ok".into()
+            }
+            ["resume", ..] => {
+                st.asleep = false;
+                // NetworkManager wakes too: the held host must not associate while the VMs reconnect
+                if self.host_pin.lock().unwrap().held {
+                    let _ = Command::new("nmcli").args(["device", "disconnect", &self.conf.host_iface]).output();
+                }
+                let lent: Vec<(u32, BTreeSet<String>)> = st.desired.iter().map(|(c, b)| (*c, b.clone())).collect();
+                for (cid, bands) in lent {
+                    for band in bands {
+                        self.attach(&mut st, cid, &band);
+                    }
+                }
+                log("resume: bands attached again");
                 "ok".into()
             }
             ["status", ..] => json!({
-                "sessions": st.sessions.iter().map(|(c, s)| (c.to_string(), json!({"band": s.band, "mac": s.mac, "connected": s.connected}))).collect::<serde_json::Map<_, _>>(),
+                "sessions": st.sessions.iter().map(|(c, s)| (c.to_string(), json!({"bands": s.bands, "iface": s.iface, "mac": s.mac, "connected": s.connected}))).collect::<serde_json::Map<_, _>>(),
                 "lent": st.desired.iter().map(|(c, b)| (c.to_string(), json!(b))).collect::<serde_json::Map<_, _>>(),
+                "asleep": st.asleep,
             })
             .to_string(),
-            _ => "error: attach <vm|cid> <band> | detach <vm|cid> [reason] | status".into(),
+            _ => "error: attach <vm|cid> <band> | detach <vm|cid> [reason] | sleep | resume | status".into(),
         }
     }
 
@@ -859,15 +1087,34 @@ impl Bridge {
 fn serve() -> std::io::Result<()> {
     let conf = conf();
     let genl = Genl::open("nl80211")?;
-    let channels = parse_channels(&String::from_utf8_lossy(&Command::new("iw").args(["phy", &conf.phy, "channels"]).output()?.stdout));
+    // the wiphy registers when the Wi-Fi driver's firmware is up, which can be after this service started: a VM
+    // given a band without channels can't scan (seen 2026-11-23); wait for them (up to 60 s)
+    let read_channels = || -> std::io::Result<BTreeMap<String, Vec<u32>>> {
+        Ok(parse_channels(&String::from_utf8_lossy(&Command::new("iw").args(["phy", &conf.phy, "channels"]).output()?.stdout)))
+    };
+    let mut channels = read_channels()?;
+    for _ in 0..60 {
+        if channels.values().any(|c| !c.is_empty()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        channels = read_channels()?;
+    }
     let info = Command::new("iw").args(["phy", &conf.phy, "info"]).output()?;
     let mfp_optional = String::from_utf8_lossy(&info.stdout).contains("MFP_OPTIONAL");
     log(format!("nl80211 family {}; channels 2g {}, 5g {}", genl.family, channels["2g"].len(), channels["5g"].len()));
-    let b = Arc::new(Bridge { conf, genl, channels, mfp_optional, st: Mutex::new(State::default()) });
+    // no band interface left up by an earlier run: a VM's bands ride on one interface, and an interface still up with
+    // the VM's address keeps the next from coming up ("Name not unique on network")
+    for iface in conf_bands_ifaces(&conf) {
+        let _ = run("ip", &["link", "set", "dev", &iface, "down"]);
+    }
+    let b = Arc::new(Bridge { conf, genl, channels, mfp_optional, st: Mutex::new(State::default()), host_pin: Mutex::new(HostPin::default()) });
     let e = b.clone();
     std::thread::spawn(move || e.event_loop());
     let c = b.clone();
     std::thread::spawn(move || c.control_loop());
+    let g = b.clone();
+    std::thread::spawn(move || g.host_guard());
     let bands: Vec<Handle> = b.conf.bands.keys().map(|band| {
         let label = match band.as_str() { "2g" => "Wi-Fi 2.4 GHz".to_string(), "5g" => "Wi-Fi 5 GHz".to_string(), b => format!("Wi-Fi {b}") };
         Handle::new(&format!("wifi:{band}"), "mship.wifi", &label, "network-wireless-symbolic", Direction::Both, &format!("wifi-{band}"))
@@ -894,7 +1141,7 @@ fn serve() -> std::io::Result<()> {
             st.serial += 1;
             let serial = st.serial;
             let mac = vm.mac.clone();
-            st.sessions.insert(cid, Session { w, vm: vm.clone(), mac, band: None, ifidx: 0, scan_id: 0, scan_started: Instant::now(),
+            st.sessions.insert(cid, Session { w, vm: vm.clone(), mac, bands: BTreeSet::new(), iface: None, ifidx: 0, freq: 0, target: None, pending: None, unreachable: BTreeMap::new(), scan_id: 0, scan_started: Instant::now(),
                                               connected: false, connecting: false, cache: BTreeMap::new(), serial });
             serial
         };

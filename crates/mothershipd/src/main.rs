@@ -98,7 +98,9 @@ impl Daemon {
         let shown: Arc<Mutex<String>> = Arc::default();
         let handover = Arc::new(handover::Handover::new(handles.clone(), move |st| {
             b.follow(&st.holders); // the panel's brightness follows the display
-            wake_shown(&p, &shown, st.holders.get("display").map_or("host", String::as_str));
+            let holder = st.holders.get("display").map_or("host", String::as_str);
+            p.set_panel_holder((holder != "host").then(|| holder.rsplit('/').next().unwrap_or(holder).to_string()));
+            wake_shown(&p, &shown, holder);
             h.set(Topic::Handover, serde_json::to_value(st).unwrap_or_default());
         }));
         let pool = Arc::new(pool::Pool::new());
@@ -138,16 +140,14 @@ impl Daemon {
         let me = self.clone();
         std::thread::Builder::new().name("api".into()).spawn(move || me.api_loop()).unwrap();
         store::watch(); // updates of the installed VMs
-        // boot: the saved charge limit (the battery driver starts at 100 %), CPU mode and brightness
+        // boot: the saved charge limit (the battery driver starts at 100 %) and CPU mode (the brightness is the boot
+        // splash's: mship-init fades the logo in to it, mship-system splash-in the shell)
         std::thread::spawn(|| {
             if let Err(e) = hpower::battery_apply() {
                 println!("charge limit: {e}");
             }
             if let Err(e) = cpu::apply_saved() {
                 println!("cpu mode: {e}");
-            }
-            if let Err(e) = hpower::display_apply() {
-                println!("brightness: {e}");
             }
         });
         self.power.start();

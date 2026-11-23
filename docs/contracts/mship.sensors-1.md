@@ -16,8 +16,10 @@ calibration and fusion inputs stay on the host.
   - An `efi-virt-arm64` slot (planned: IIO devices or iio-sensor-proxy in the Ubuntu image).
 
 ## Guest view (`cuttlefish-arm64`)
-- **Transport:** virtio-console port 13 (`/dev/hvc13`), the console the stock Cuttlefish sensors HAL (the Android
-  emulator's goldfish multi-HAL) opens. The guest needs no code of its own; PixelOS patches the HAL so that it
+- **Transport:** virtio-console ports the stock Cuttlefish sensors HAL (the Android emulator's goldfish multi-HAL)
+  opens: one console for everything, port 13 (`/dev/hvc13`, Android 16), or a control console, port 18
+  (`/dev/hvc18`: `list-sensors` and its reply, the commands), and a data console, port 19 (`/dev/hvc19`: the
+  events), from Android 17. The host offers both layouts; the guest's HAL uses its own. The guest needs no code of its own; PixelOS patches the HAL so that it
   enables only the sensors Android has active (stock goldfish enables all of them once and filters inside the guest,
   which would keep the phone's sensor DSP streaming).
 - **Framing:** every message is `u32 command` (bits 0-30, 0) `| response` (bit 31), `u32 payload size`, payload

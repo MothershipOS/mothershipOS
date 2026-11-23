@@ -130,7 +130,7 @@ fn floats(fields: &[(u32, Value)], field: u32) -> Vec<f32> {
         }
         match v {
             Value::Fixed32(x) => out.push(f32::from_bits(*x)),
-            Value::Bytes(b) => out.extend(b.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap()))),
+            Value::Bytes(b) => out.extend(b.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c))),
             _ => {}
         }
     }

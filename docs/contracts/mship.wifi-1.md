@@ -8,15 +8,25 @@ stations on two channels, otherwise one `wifi:any`.
 - **Works** (while the firmware runs): in PixelOS: scan shows only the attached band; WPA2-PSK connect with the guest's supplicant; DHCP from
   the real LAN; MAC randomization followed by the host; release (deauth, guest disconnected, interface down) and
   re-attach (the guest reconnects in ~3 s). A band is hot-plugged: lent to and taken from a running VM (the bridge
-  attaches the band's interface to the VM's tap, and releases it).
+  attaches the band's interface to the VM's tap, and releases it). Both bands to one VM: they ride on one station
+  interface (the first band's), the guest sees the channels of both; taking one band away leaves the other.
+  The host's station is held disconnected while VMs use Wi-Fi: the firmware crashes adding a second station's peer
+  (`Failed to add peer`, then RDDM), on the VM's AP and on another AP of the network alike. From a VM's first connect
+  NetworkManager's device is disconnected (`nmcli device disconnect`, no autoconnect), again at each phone resume and
+  whenever the host associates anyway (checked every 2 s); it reconnects once no VM has been
+  connected or connecting for 60 s. Across the phone's suspend: the bands are released before and attached after.
+  Scheduled scans (the guest driver runs them as host scans at the requested interval, and at once when bands come
+  back): PixelOS rejoins while asleep after a phone resume (PNO; `MothershipWifiOverlay` sets
+  `config_wifi_background_scan_support`). A BSS that doesn't answer
+  (connect timeout) is skipped for 5 minutes and the same connect goes to the strongest other BSS of the SSID in the
+  VM's bands; the guest sees only the final result (Android disables a network after a few failures).
 - **Broken:** recovery from a firmware crash. The QCA6390 firmware can crash during a connection
   (`firmware crashed: MHI_CB_EE_RDDM` after `Failed to add peer` in the kernel log) and ath11k does not recover it;
   reloading `ath11k_pci` does not bring the firmware back (it stops after `qca6390 hw2.0`), only a reboot does. Until
   then neither the host nor a VM has Wi-Fi, and lending a band fails (`ip link set dev mshw5g up: ... transport
   endpoint shutdown`).
 - **Needs work:**
-  - One band per VM at a time (two station interfaces with the same MAC aren't allowed by mac80211; needs
-    per-connection interface switching).
+  - The host has no Wi-Fi while a VM is connected (firmware limit, above).
   - `hello` carries no host capabilities: the guest advertises PMF-optional and a fixed cipher list; the bridge maps
     PMF-optional to no PMF when the host wiphy lacks it (PMF-required networks fail).
   - No rfkill state: an unattached band is only disabled channels. The host's regulatory domain isn't forwarded

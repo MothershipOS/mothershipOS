@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -31,9 +31,19 @@ use mship_host::{power as hpower, vm};
 use serde_json::{Value, json};
 
 const CPUFREQ: &str = "/sys/devices/system/cpu/cpufreq";
-const GPU: &str = "/sys/class/devfreq/3d00000.gpu";
-const UDC: &str = "/sys/class/udc/a600000.usb/state";
-const BATT: &str = "/sys/class/power_supply/battery";
+/// the GPU's devfreq, the battery and the USB device controller's state (mship_core::device; empty paths read as
+/// absent)
+fn gpu() -> PathBuf {
+    mship_core::device::gpu_devfreq().unwrap_or_default()
+}
+
+fn batt() -> PathBuf {
+    mship_core::device::power_supply("Battery").unwrap_or_default()
+}
+
+fn udc_state() -> PathBuf {
+    std::fs::read_dir("/sys/class/udc").ok().and_then(|mut d| d.next()).and_then(|e| e.ok()).map(|e| e.path().join("state")).unwrap_or_default()
+}
 const CROSVM: &str = "/opt/mship-gpu/bin/crosvm";
 const USB_CTL: &str = "/run/mothership/usb.sock";
 const VERSIONS: &[&str] = &["1.0"];
@@ -142,9 +152,9 @@ fn vm_for_cid(cid: u32) -> Option<String> {
 }
 
 /// The phone's own vote: what mothershipOS itself needs.
-fn host_vote() -> Vote {
+/// `screen_on`: the phone's panel is lit (Power::panel_lit: a VM holding it may have blanked it).
+fn host_vote(screen_on: bool) -> Vote {
     let conf = hpower::power_conf();
-    let screen_on = hpower::screen_on();
     let mut hold = vec![];
     if !conf.sleep {
         hold.push("sleep disabled in Settings");
@@ -160,11 +170,11 @@ fn host_vote() -> Vote {
         hold.push("external display connected");
     }
     // the charge limit is enforced by the driver's poll loop, which does not run while suspended
-    let end: u32 = rd(Path::new(BATT).join("charge_control_end_threshold"), "100").parse().unwrap_or(100);
-    if end < 100 && rd(Path::new(BATT).join("status"), "") == "Charging" {
+    let end: u32 = rd(batt().join("charge_control_end_threshold"), "100").parse().unwrap_or(100);
+    if end < 100 && rd(batt().join("status"), "") == "Charging" {
         hold.push("charging to the charge limit");
     }
-    if conf.stay_awake_usb && rd(UDC, "") == "configured" {
+    if conf.stay_awake_usb && rd(udc_state(), "") == "configured" {
         hold.push("USB dev link");
     }
     Vote {
@@ -201,12 +211,12 @@ fn apply_floors(floors: &BTreeMap<Resource, Level>) -> BTreeMap<String, Option<u
         }
         applied.insert(format!("cpu.{p}"), Some(want));
     }
-    let freqs = table_of(Path::new(GPU).join("available_frequencies"));
+    let freqs = table_of(gpu().join("available_frequencies"));
     if !freqs.is_empty() {
-        let top = rd(Path::new(GPU).join("max_freq"), "").parse().unwrap_or(freqs[freqs.len() - 1]);
+        let top = rd(gpu().join("max_freq"), "").parse().unwrap_or(freqs[freqs.len() - 1]);
         let want = freq_floor(&freqs, top, floors.get(&Resource::Gpu).copied().unwrap_or(Level::Low));
-        if rd_u64(Path::new(GPU).join("min_freq")) != want {
-            let _ = wr(Path::new(GPU).join("min_freq"), want);
+        if rd_u64(gpu().join("min_freq")) != want {
+            let _ = wr(gpu().join("min_freq"), want);
         }
         applied.insert("gpu".into(), Some(want));
     }
@@ -276,8 +286,8 @@ fn usb_inputs() -> Vec<String> {
 }
 
 fn battery_critical() -> bool {
-    let cap: Option<i64> = rd(Path::new(BATT).join("capacity"), "").parse().ok();
-    cap.is_some_and(|c| c <= CRITICAL_PCT) && rd(Path::new(BATT).join("status"), "") == "Discharging"
+    let cap: Option<i64> = rd(batt().join("capacity"), "").parse().ok();
+    cap.is_some_and(|c| c <= CRITICAL_PCT) && rd(batt().join("status"), "") == "Discharging"
 }
 
 // ---------------------------------------------------------------- the domain
@@ -301,6 +311,8 @@ struct Inner {
     display_off: BTreeMap<String, bool>,
     /// VM -> its guest's display is on, as its presenter sees it (VMs without a guest adapter)
     screens: BTreeMap<String, bool>,
+    /// the VM the panel is lent to (the handover's display holder)
+    panel_holder: Option<String>,
 }
 
 pub struct Power {
@@ -341,10 +353,25 @@ impl Power {
         self.inner.lock().unwrap().frozen.contains_key(vm)
     }
 
+    /// The handover lent the panel to `vm` (None: the host has it).
+    pub fn set_panel_holder(&self, vm: Option<String>) {
+        self.inner.lock().unwrap().panel_holder = vm;
+    }
+
+    /// Is the phone's panel lit? The host's screen flag, unless the panel is lent to a VM whose guest blanked it (its
+    /// presenter switched the panel off): then the phone's screen is off although the host never turned it off.
+    pub fn panel_lit(&self) -> bool {
+        if !hpower::screen_on() {
+            return false;
+        }
+        let i = self.inner.lock().unwrap();
+        !i.panel_holder.as_ref().is_some_and(|vm| i.screens.get(vm) == Some(&false))
+    }
+
     // ------------------------------------------------ table
     fn table(&self) -> BTreeMap<String, Vote> {
         let t = now();
-        let mut out = BTreeMap::from([(HOST.to_string(), host_vote())]);
+        let mut out = BTreeMap::from([(HOST.to_string(), host_vote(self.panel_lit()))]);
         let running = running_vms();
         let mut i = self.inner.lock().unwrap();
         i.frozen.retain(|n, _| running.contains_key(n)); // stopped while asleep
@@ -401,7 +428,7 @@ impl Power {
     // ------------------------------------------------ the 2 s pass
     pub fn tick(&self, guard: &GuardState) {
         if battery_critical() {
-            println!("battery at {}% and discharging: powering off", rd(Path::new(BATT).join("capacity"), "?"));
+            println!("battery at {}% and discharging: powering off", rd(batt().join("capacity"), "?"));
             run("systemctl", &["poweroff"]);
             return;
         }
@@ -438,8 +465,9 @@ impl Power {
     /// Suspend-to-idle once the screen has been off for the sleep delay and every participant agrees; after every
     /// wake that did not turn the screen on (RTC, volume key, Wi-Fi) the delay starts again.
     fn maybe_suspend(&self, allowed: bool) {
+        let lit = self.panel_lit();
         let mut off = self.off_since.lock().unwrap();
-        if hpower::screen_on() {
+        if lit {
             *off = None;
             return;
         }

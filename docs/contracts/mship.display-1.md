@@ -3,6 +3,9 @@
 - **Works:** a DRM lease of the panel (PixelOS) or the USB-C external display (Ubuntu desktop) with the guest's
   buffers scanned out zero-copy.
 - **Needs work:**
+  - Frames still drop in PixelOS 17: with the blurred notification shade about 12% of frames take two vblanks at
+    90 Hz (perfetto frame timeline, 2026-11-23: SurfaceFlinger GPU deadline missed, Display HAL), after the
+    nonblocking present (pixelOS_17_VM goldfish patch 0003) took it from ~48%.
   - While empty, the presenter (`mship-presenter`) completes frame callbacks immediately (unthrottled), instead of
     at the nominal rate.
   - `efi-virt-arm64` gets the external display (`display:dp0`, group `display-ext`) hot-plugged at the monitor's

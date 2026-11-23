@@ -1,0 +1,36 @@
+#!/usr/bin/python3
+# mothershipOS sleep preparation (systemd-sleep runs this with "pre" before every suspend, "post" after the resume):
+# the device services quiesce their hardware before the kernel freezes them, and take it up again after.
+# Each gets one datagram on its control socket and is waited for (a service that is not running is skipped).
+import os, socket, sys
+
+SERVICES = [
+    # Wi-Fi: no VM band attached while suspending (ath11k cannot suspend with frames queued on a band interface)
+    "/run/mothership/wifi-bridge.sock",
+    # sensors: no stream while suspending (the DSP's sensor process calls the frozen file server and crashes)
+    "/run/mothership/sensors.sock",
+]
+
+def tell(path, msg):
+    if not os.path.exists(path):
+        return
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    me = "/run/mothership/sleep-hook.%d" % os.getpid()
+    try:
+        s.bind(me)
+        s.settimeout(2.0)
+        s.sendto(msg.encode(), path)
+        print("mothership sleep hook: %s %s: %s" % (path, msg, s.recv(4096).decode().strip()))
+    except OSError as e:
+        print("mothership sleep hook: %s %s: %s" % (path, msg, e))
+    finally:
+        s.close()
+        try:
+            os.unlink(me)
+        except OSError:
+            pass
+
+what = {"pre": "sleep", "post": "resume"}.get(sys.argv[1] if len(sys.argv) > 1 else "")
+if what:
+    for p in (SERVICES if what == "sleep" else reversed(SERVICES)):
+        tell(p, what)

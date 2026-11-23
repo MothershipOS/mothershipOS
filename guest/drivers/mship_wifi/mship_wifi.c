@@ -125,6 +125,15 @@ static struct {
 	spinlock_t scan_lock;
 	struct cfg80211_scan_request *scan_req;
 	u32 scan_id;
+	/* scheduled scan (Android's PNO while its screen is off): host scans every sched_interval s, results
+	 * reported to cfg80211, which wakes the supplicant to pick a network. Without it a guest left
+	 * disconnected while asleep (the host suspended: its bands were released) stayed so until its
+	 * screen came on. */
+	struct delayed_work sched_work;
+	u64 sched_reqid;
+	unsigned int sched_interval;
+	bool sched_on;
+	bool sched_scanning;		/* the scan in flight is ours (scan_lock) */
 	struct work_struct create_work;
 	int create_ifindex;
 	bool attached;			/* some band is attached: data path open */
@@ -303,13 +312,18 @@ static void mw_scan_finish(bool aborted)
 {
 	struct cfg80211_scan_info info = { .aborted = aborted };
 	struct cfg80211_scan_request *req;
+	bool sched;
 
 	spin_lock_bh(&mw.scan_lock);
 	req = mw.scan_req;
 	mw.scan_req = NULL;
+	sched = mw.sched_scanning;
+	mw.sched_scanning = false;
 	spin_unlock_bh(&mw.scan_lock);
 	if (req)
 		cfg80211_scan_done(req, &info);
+	if (sched && !aborted && READ_ONCE(mw.sched_on))
+		cfg80211_sched_scan_results(mw.wiphy, mw.sched_reqid);
 }
 
 static void mw_inform_bss(const struct mw_attrs *at, int ies_attr)
@@ -408,6 +422,9 @@ static void mw_handle(u16 op, u32 id, const struct mw_attrs *at)
 		break;
 	case MW_ATTACHED:
 		mw_attach_channels(at);
+		/* bands back (e.g. after the host's suspend): look for networks now, not at the next interval */
+		if (READ_ONCE(mw.sched_on) && READ_ONCE(mw.attached))
+			mod_delayed_work(system_wq, &mw.sched_work, HZ);
 		break;
 	case MW_DETACHED:
 		mw_disconnected(WLAN_REASON_DEAUTH_LEAVING, true);
@@ -559,7 +576,7 @@ static int mw_scan(struct wiphy *wiphy, struct cfg80211_scan_request *req)
 	int i, n = 0, r;
 
 	spin_lock_bh(&mw.scan_lock);
-	if (mw.scan_req) {
+	if (mw.scan_req || mw.sched_scanning) {
 		spin_unlock_bh(&mw.scan_lock);
 		return -EBUSY;
 	}
@@ -596,6 +613,55 @@ static int mw_scan(struct wiphy *wiphy, struct cfg80211_scan_request *req)
 		spin_unlock_bh(&mw.scan_lock);
 	}
 	return r;
+}
+
+static void mw_sched_fn(struct work_struct *work)
+{
+	static const u8 wildcard[1] = { 0 };	/* one SSID entry of length 0: an active scan */
+	struct mw_msg m;
+	u32 id = mw_id();
+	unsigned int next = READ_ONCE(mw.sched_interval);
+
+	if (!READ_ONCE(mw.sched_on))
+		return;
+	if (READ_ONCE(mw.attached)) {
+		spin_lock_bh(&mw.scan_lock);
+		if (mw.scan_req || mw.sched_scanning) {
+			spin_unlock_bh(&mw.scan_lock);
+			next = 2;
+		} else {
+			mw.sched_scanning = true;
+			mw.scan_id = id;
+			spin_unlock_bh(&mw.scan_lock);
+			mw_msg_init(&m, MW_SCAN, id);
+			mw_put(&m, MWA_SSIDS, wildcard, sizeof(wildcard));	/* every attached channel */
+			if (mw_send(&m)) {
+				spin_lock_bh(&mw.scan_lock);
+				mw.sched_scanning = false;
+				spin_unlock_bh(&mw.scan_lock);
+			}
+		}
+	}
+	if (READ_ONCE(mw.sched_on))
+		mod_delayed_work(system_wq, &mw.sched_work, next * HZ);
+}
+
+static int mw_sched_scan_start(struct wiphy *wiphy, struct net_device *dev, struct cfg80211_sched_scan_request *req)
+{
+	unsigned int interval = req->n_scan_plans ? req->scan_plans[0].interval : 30;
+
+	mw.sched_reqid = req->reqid;
+	WRITE_ONCE(mw.sched_interval, clamp(interval, 10u, 3600u));
+	WRITE_ONCE(mw.sched_on, true);
+	mod_delayed_work(system_wq, &mw.sched_work, max(req->delay, 1u) * HZ);
+	return 0;
+}
+
+static int mw_sched_scan_stop(struct wiphy *wiphy, struct net_device *dev, u64 reqid)
+{
+	WRITE_ONCE(mw.sched_on, false);
+	cancel_delayed_work_sync(&mw.sched_work);
+	return 0;
 }
 
 static void mw_abort_scan(struct wiphy *wiphy, struct wireless_dev *wdev)
@@ -778,6 +844,8 @@ static int mw_set_cqm(struct wiphy *wiphy, struct net_device *dev, s32 thold, u3
 static const struct cfg80211_ops mw_ops = {
 	.scan = mw_scan,
 	.abort_scan = mw_abort_scan,
+	.sched_scan_start = mw_sched_scan_start,
+	.sched_scan_stop = mw_sched_scan_stop,
 	.connect = mw_connect,
 	.disconnect = mw_disconnect,
 	.add_key = mw_add_key,
@@ -987,6 +1055,7 @@ static int __init mw_init(void)
 	init_completion(&mw.sync_done);
 	spin_lock_init(&mw.scan_lock);
 	INIT_WORK(&mw.create_work, mw_create_fn);
+	INIT_DELAYED_WORK(&mw.sched_work, mw_sched_fn);
 
 	w = wiphy_new(&mw_ops, 0);
 	if (!w)
@@ -995,6 +1064,12 @@ static int __init mw_init(void)
 	w->signal_type = CFG80211_SIGNAL_TYPE_MBM;
 	w->max_scan_ssids = 10;
 	w->max_scan_ie_len = 1000;
+	w->max_sched_scan_reqs = 1;
+	w->max_sched_scan_ssids = 16;
+	w->max_match_sets = 16;
+	w->max_sched_scan_ie_len = 1000;
+	w->max_sched_scan_plans = 1;
+	w->max_sched_scan_plan_interval = 3600;
 	w->bands[NL80211_BAND_2GHZ] = &mw_band2;
 	w->bands[NL80211_BAND_5GHZ] = &mw_band5;
 	w->cipher_suites = mw_ciphers;
@@ -1035,6 +1110,8 @@ static void __exit mw_exit(void)
 		kernel_sock_shutdown(mw.sock, SHUT_RDWR);
 	mutex_unlock(&mw.send_lock);
 	kthread_stop(mw.thread);
+	WRITE_ONCE(mw.sched_on, false);
+	cancel_delayed_work_sync(&mw.sched_work);
 	unregister_netdevice_notifier(&mw_notifier);
 	flush_work(&mw.create_work);
 	rtnl_lock();
