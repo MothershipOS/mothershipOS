@@ -1,6 +1,6 @@
 [package]
 name = "mship-devices"
-description = "mothershipOS device services: the phone's battery, Bluetooth, cameras, GNSS receiver, modem, sensors, USB devices and Wi-Fi bands for VMs"
+description = "mothershipOS device services: the phone's battery, Bluetooth, cameras, fingerprint reader, GNSS receiver, modem, sensors, USB devices and Wi-Fi bands for VMs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -30,6 +30,10 @@ name = "mship-camera"
 path = "src/bin/camera/main.rs"
 
 [[bin]]
+name = "mship-fingerprint"
+path = "src/bin/fingerprint/main.rs"
+
+[[bin]]
 name = "mship-gnss"
 path = "src/bin/gnss/main.rs"
 
@@ -52,7 +56,3 @@ path = "src/bin/usb.rs"
 [[bin]]
 name = "mship-wifi-bridge"
 path = "src/bin/wifi.rs"
-
-[[bin]]
-name = "fpc-test"
-path = "src/bin/fpc_test.rs"

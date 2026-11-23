@@ -1,0 +1,14 @@
+[Unit]
+Description=mothershipOS fingerprint reader (mship.fingerprint: the phone's sensor and its secure-world matcher for VMs)
+# only on a port that has a reader (its configuration names the driver's device)
+ConditionPathExists=/etc/mothership/fingerprint.json
+Before=mothershipd.service
+After=systemd-modules-load.service
+
+[Service]
+ExecStart=/usr/local/sbin/mship-fingerprint
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

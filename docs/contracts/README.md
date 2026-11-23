@@ -27,4 +27,4 @@ that introduces the version ships.
 | [mship.gnss](mship.gnss-1.md) | the GNSS receiver: NMEA epochs, the guest starts and stops it (virtio-console) |
 | [mship.sensors](mship.sensors-1.md) | accelerometer, gyroscope, magnetometer, proximity, light for every VM at once (virtio-console) |
 | [mship.power](mship.power-1.md) | system power votes: sleep permission and clock floors (vsock); implemented, not yet in the registry |
-| [mship.fingerprint](mship.fingerprint-1.md) | a fingerprint reader for one VM (enrol/match in the host TA); design only |
+| [mship.fingerprint](mship.fingerprint-1.md) | a fingerprint reader for one VM (enrol/match in the host's secure world, vsock 9700); non-crypto unlock |
